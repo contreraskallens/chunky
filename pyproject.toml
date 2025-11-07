@@ -1,0 +1,27 @@
+[project]
+name = "chunkyness"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.4.1",
+    "nltk>=3.9.2",
+    "numpy>=2.3.4",
+    "pandas>=2.3.3",
+    "psycopg>=3.2.12",
+    "regex>=2025.10.23",
+    "rich>=14.2.0",
+    "tqdm>=4.67.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipython>=9.6.0",
+    "jupyter>=1.1.1",
+    "line-profiler>=5.0.0",
+    "patsy>=1.0.2",
+    "pretty-errors>=1.2.25",
+    "pytest>=8.4.2",
+    "statsmodels>=0.14.5",
+]
