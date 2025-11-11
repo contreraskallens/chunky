@@ -5,6 +5,7 @@
 # TODO(omfgzell): make method for large batches and for specific measures. #12
 # TODO(omfgzell): Check that weights sum 1 #13
 # TODO(omfgzell): test for corpora other than CoCA. #14
+# TODO(omfgzell): Return dataclass instead of tuples and dictionaries #15
 
 from __future__ import annotations
 

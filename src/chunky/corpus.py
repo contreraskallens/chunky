@@ -12,6 +12,29 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import sqlalchemy as db
+from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase
+from sqlalchemy.ext.declarative import declarative_base, DeclarativeMeta
+from sqlalchemy.ext.automap import automap_base
+from sqlalchemy.sql import select
+from sqlalchemy import (
+    create_engine,
+    MetaData,
+    BigInteger,
+    CHAR,
+    Column,
+    DateTime,
+    Float,
+    Integer,
+    SmallInteger,
+    String,
+    Table,
+    Unicode,
+    text,
+    inspect,
+    PrimaryKeyConstraint,
+    func,
+)
 import duckdb
 import pandas as pd
 from psycopg import sql
@@ -78,6 +101,28 @@ class Corpus:
         """
         self.corpus_name = corpus_name
         self._path = Path(f"chunky/db/{corpus_name}.db")
+        self._engine = db.create_engine(
+            f"duckdb:///{self._path}",
+            echo=False,
+        )
+        session_maker = sessionmaker(bind=self._engine)
+        self._session = session_maker()
+
+        # print(repr(self._session))
+        # metadata = db.MetaData()
+        # self._db = db.Table(
+        #     "unigram_db",
+        #     metadata,
+        # )
+        # print(repr(self._db))
+        # # print(self._engine.connect().execute(self._db.select()).fetchall())
+        # self._session = Session(self._engine)
+        # print(self._engine)
+        # with self._session as session:
+        #     result = session.execute(text("SELECT * FROM unigram_db LIMIT 100"))
+        #     for row in result:
+        #         print(row)
+
         self._temp = TEMP_PATH
         if not self._temp.exists():
             self._temp.mkdir(parents=True)
@@ -706,11 +751,13 @@ corpus_dir at initialization."""
             sql.SQL("""
             CREATE OR REPLACE TABLE reduced_query AS
             SELECT
-                *
+                row_number() OVER () as id,
+                {source_id} AS comp_1,
+                {target_id} AS comp_2
             FROM
                 this_query
                 SEMI JOIN token_freq USING({source_id}, {target_id})
-            ORDER BY {source_id}, {target_id}
+            ORDER BY comp_1, comp_2
             """)
             .format(
                 source_id=source_identifier,
@@ -722,8 +769,8 @@ corpus_dir at initialization."""
             sql.SQL("""
                 CREATE OR REPLACE TABLE filtered_db AS
                 SELECT
-                    {source_id},
-                    {target_id},
+                    {source_id} AS comp_1,
+                    {target_id} AS comp_2,
                     SUM(
                         COLUMNS(* EXCLUDE(ug_1, ug_2, ug_3, ug_4, big_1, trig_1))
                     )
@@ -732,19 +779,19 @@ corpus_dir at initialization."""
                 WHERE
                     {source_id} IN (
                         SELECT
-                            {source_id}
+                            comp_1
                         FROM
                             reduced_query
                     )
                     OR {target_id} IN (
                         SELECT
-                            {target_id}
+                            comp_2
                         FROM
                             reduced_query
                     )
                 GROUP BY
-                    {source_id},
-                    {target_id}
+                    comp_1,
+                    comp_2
                 """)
             .format(
                 source_id=source_identifier,
@@ -757,6 +804,66 @@ corpus_dir at initialization."""
             conn.execute(reduce_query)
             conn.execute("ANALYZE reduced_query")
             conn.execute(filter_query)
+            conn.execute("ALTER TABLE filtered_db ADD PRIMARY KEY (comp_1, comp_2)")
+            conn.execute("ALTER TABLE reduced_query ADD PRIMARY KEY (id)")
+
+        print(self.df("SELECT * FROM reduced_query ORDER BY comp_1"))
+        print(self.df("SELECT * FROM filtered_db ORDER BY comp_1"))
+        metadata = MetaData()
+        metadata.reflect(bind=self._engine)
+
+        filtered_table = metadata.tables["filtered_db"]
+
+        if not filtered_table.primary_key or not filtered_table.primary_key.columns:
+            filtered_table.append_constraint(
+                PrimaryKeyConstraint(filtered_table.c.comp_1, filtered_table.c.comp_2),
+            )
+
+        reduced_query = metadata.tables["reduced_query"]
+
+        if not reduced_query.primary_key or not reduced_query.primary_key.columns:
+            reduced_query.append_constraint(
+                PrimaryKeyConstraint(reduced_query.c.id),
+            )
+
+        base = automap_base(metadata=metadata)
+        base.prepare()
+        return base.classes.reduced_query, base.classes.filtered_db
+
+    def _make_type_freq_sa(
+        self, reduced_query: DeclarativeMeta, db: DeclarativeMeta
+    ) -> None:
+        """Make a table with type frequencies for the queried ngrams.
+
+        Args:
+            ngram_query: An NgramQuery object containing ngrams and
+            source/target information.
+
+        """
+
+        type_1_query = select(db.comp_2, func.count().label("typef_1"))
+        type_1_query = type_1_query.group_by(db.comp_2)
+        type_1_query = type_1_query.subquery()
+        type_2_query = select(db.comp_1, func.count().label("typef_2"))
+        type_2_query = type_2_query.group_by(db.comp_1)
+        type_2_query = type_2_query.subquery()
+        type_freq_query = (
+            select(
+                reduced_query,
+                type_1_query.c.typef_1,
+                type_2_query.c.typef_2,
+            )
+            .join(
+                type_1_query,
+                reduced_query.comp_2 == type_1_query.c.comp_2,
+            )
+            .join(
+                type_2_query,
+                reduced_query.comp_1 == type_2_query.c.comp_1,
+            )
+        )
+
+        return type_freq_query
 
     def _make_type_freq(self, ngram_query: NgramQuery) -> None:
         """Make a table with type frequencies for the queried ngrams.
@@ -1610,10 +1717,12 @@ corpus_dir at initialization."""
             self._make_token_freq(ngram_query)
             pbar.update(1)
             logger.debug("Making reduced table...")
-            self._reduce_query(ngram_query)
+            reduced_query, reduced_table = self._reduce_query(ngram_query)
             pbar.update(1)
             logger.debug("Computing type frequencies...")
-            self._make_type_freq(ngram_query)
+            if reduced_query is not None and reduced_table is not None:
+                self._make_type_freq_sa(reduced_query, reduced_table)
+            # self._make_type_freq(ngram_query)
             pbar.update(1)
             logger.debug("Computing dispersion...")
             self._make_dispersion(ngram_query)
