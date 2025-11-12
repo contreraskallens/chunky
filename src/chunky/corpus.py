@@ -11,6 +11,8 @@ import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
+from operator import add
+from functools import reduce
 
 import sqlalchemy as db
 from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase
@@ -34,6 +36,8 @@ from sqlalchemy import (
     inspect,
     PrimaryKeyConstraint,
     func,
+    case,
+    literal,
 )
 import duckdb
 import pandas as pd
@@ -593,6 +597,7 @@ corpus_dir at initialization."""
                 """
                 CREATE OR REPLACE TABLE corpus_proportions AS (
                     SELECT
+                        row_number() OVER () AS id,
                         SUM(COLUMNS(* EXCLUDE(ug, ug_hash, freq))) / SUM(freq)
                     FROM
                     unigram_db
@@ -806,9 +811,8 @@ corpus_dir at initialization."""
             conn.execute(filter_query)
             conn.execute("ALTER TABLE filtered_db ADD PRIMARY KEY (comp_1, comp_2)")
             conn.execute("ALTER TABLE reduced_query ADD PRIMARY KEY (id)")
+            conn.execute("ALTER TABLE corpus_proportions ADD PRIMARY KEY (id)")
 
-        print(self.df("SELECT * FROM reduced_query ORDER BY comp_1"))
-        print(self.df("SELECT * FROM filtered_db ORDER BY comp_1"))
         metadata = MetaData()
         metadata.reflect(bind=self._engine)
 
@@ -826,9 +830,19 @@ corpus_dir at initialization."""
                 PrimaryKeyConstraint(reduced_query.c.id),
             )
 
+        corpus_proportions = metadata.tables["corpus_proportions"]
+        print(corpus_proportions)
+        if (
+            not corpus_proportions.primary_key
+            or not corpus_proportions.primary_key.columns
+        ):
+            corpus_proportions.append_constraint(
+                PrimaryKeyConstraint(corpus_proportions.c.id),
+            )
+
         base = automap_base(metadata=metadata)
         base.prepare()
-        return base.classes.reduced_query, base.classes.filtered_db
+        return base.classes.reduced_query, base.classes.filtered_db, corpus_proportions
 
     def _make_type_freq_sa(
         self, reduced_query: DeclarativeMeta, db: DeclarativeMeta
@@ -847,20 +861,19 @@ corpus_dir at initialization."""
         type_2_query = select(db.comp_1, func.count().label("typef_2"))
         type_2_query = type_2_query.group_by(db.comp_1)
         type_2_query = type_2_query.subquery()
-        type_freq_query = (
-            select(
-                reduced_query,
-                type_1_query.c.typef_1,
-                type_2_query.c.typef_2,
-            )
-            .join(
-                type_1_query,
-                reduced_query.comp_2 == type_1_query.c.comp_2,
-            )
-            .join(
-                type_2_query,
-                reduced_query.comp_1 == type_2_query.c.comp_1,
-            )
+        type_freq_query = select(
+            reduced_query,
+            type_1_query.c.typef_1,
+            type_2_query.c.typef_2,
+        )
+        type_freq_query = type_freq_query.join(
+            type_1_query,
+            reduced_query.comp_2 == type_1_query.c.comp_2,
+        )
+
+        type_freq_query = type_freq_query.join(
+            type_2_query,
+            reduced_query.comp_1 == type_2_query.c.comp_1,
         )
 
         return type_freq_query
@@ -989,6 +1002,83 @@ corpus_dir at initialization."""
             self._reduce_query(ngram_query)
         self._make_type_freq(ngram_query)
         return self.df("SELECT * FROM type_freq")
+
+    def _get_prop_columns(self, db):
+        mapper = inspect(db)
+
+        prop_columns = []
+        for column in mapper.columns:
+            if column.name in ["comp_1", "comp_2"]:
+                prop_columns.append(column)
+            elif column.name not in ["freq", "id"]:
+                prop_column = (column / db.freq).label(column.name)
+                prop_columns.append(prop_column)
+        return select(*prop_columns)
+
+    def _get_dist_table(self, corpus_props, all_corpus_props):
+        mapper_props = inspect(corpus_props)
+        mapper_all = inspect(all_corpus_props)
+
+        dist_columns = []
+
+        for column in mapper_props.columns:
+            if column.name in ["comp_1", "comp_2", "id"]:
+                dist_columns.append(column)
+            else:
+                log_column = case(
+                    (column == 0, 0),
+                    else_=column * func.log2(column / mapper_all.columns[column.name]),
+                )
+                log_column = log_column.label(column.name)
+                dist_columns.append(log_column)
+        return select(*dist_columns)
+
+    def _sum_rows(self, db, label):
+        mapper = inspect(db)
+        cols_to_sum = []
+        summed_cols = []
+
+        for column in mapper.columns:
+            if column.name in ["comp_1", "comp_2", "id"]:
+                summed_cols.append(column)
+            else:
+                cols_to_sum.append(column)
+        summed = reduce(lambda x, y: x + y, cols_to_sum).label(label)
+        return select(*summed_cols, summed)
+
+    def _normalize_kld(self, db, label):
+        db = db.subquery()
+        normalized_kld = (1 - func.pow(func.exp(1), -db.c.kld)).label(label)
+        return select(db.c.comp_1, db.c.comp_2, normalized_kld)
+
+    def _make_dispersion_sa(
+        self,
+        reduced_query: DeclarativeMeta,
+        db: DeclarativeMeta,
+        corpus_proportions,
+    ) -> None:
+        """Make a table with a dispersion measure for the queried ngrams.
+
+        Args:
+            source (str): Identifier of the first half of the ngram.
+            target (str): Identifier of the second half of the ngram.
+
+        """
+        prop_table = self._get_prop_columns(db).subquery()
+
+        prop_columns = [
+            column for column in prop_table.c if column.name not in ["comp_1", "comp_2"]
+        ]
+        prop_table = select(reduced_query, *prop_columns).join(
+            prop_table,
+            (reduced_query.comp_1 == prop_table.c.comp_1)
+            & (reduced_query.comp_2 == prop_table.c.comp_2),
+        )
+
+        dist_table = self._get_dist_table(prop_table, corpus_proportions)
+
+        kld_table = self._sum_rows(dist_table, "kld")
+        return self._normalize_kld(kld_table, "dispersion")
 
     def _make_dispersion(self, ngram_query: NgramQuery) -> None:
         """Make a table with a dispersion measure for the queried ngrams.
@@ -1138,6 +1228,97 @@ corpus_dir at initialization."""
         self._make_dispersion(ngram_query)
         return self.df("SELECT * FROM dispersion")
 
+    def _get_rel_freqs(self, db, reduced_query):
+        source_freq = select(
+            db.comp_1,
+            func.sum(db.freq).label("source_freq"),
+        ).group_by(db.comp_1)
+        source_freq = source_freq.subquery()
+        target_freq = select(
+            db.comp_2,
+            func.sum(db.freq).label("target_freq"),
+        ).group_by(db.comp_2)
+        target_freq = target_freq.subquery()
+        total_freq = self._session.execute(
+            text("SELECT SUM(freq) AS total_freq FROM unigram_db"),
+        ).fetchone()
+        if total_freq is not None:
+            total_freq = total_freq[0]
+        else:
+            exception_msg = "Oops something happened"
+            raise RuntimeError(exception_msg)
+        rel_freqs = select(
+            reduced_query,
+            literal(total_freq).label("total_freq"),
+            source_freq.c.source_freq,
+            target_freq.c.target_freq,
+        )
+        rel_freqs = rel_freqs.join(
+            source_freq,
+            source_freq.c.comp_1 == reduced_query.comp_1,
+        )
+        rel_freqs = rel_freqs.join(
+            target_freq, target_freq.c.comp_2 == reduced_query.comp_2
+        )
+        return rel_freqs
+
+    def _get_probs(self, rel_freq, token_freq):
+        token_freq = token_freq.subquery()
+        rel_freq = select(rel_freq, token_freq.c.freq).join(
+            token_freq,
+            (rel_freq.c.comp_1 == token_freq.c.comp_1)
+            & (rel_freq.c.comp_2 == token_freq.c.comp_2),
+        )
+
+        probs = select(
+            rel_freq.c.comp_1,
+            rel_freq.c.comp_2,
+            (rel_freq.c.freq / rel_freq.c.source_freq).label("prob_2_1"),
+            (rel_freq.c.freq / rel_freq.c.target_freq).label("prob_1_2"),
+            (rel_freq.c.source_freq / rel_freq.c.total_freq).label("prob_1"),
+            (rel_freq.c.target_freq / rel_freq.c.total_freq).label("prob_2"),
+        ).subquery()
+        probs = select(
+            probs,
+            (1 - probs.c.prob_2_1).label("prob_no_2_1"),
+            (1 - probs.c.prob_1_2).label("prob_no_1_2"),
+            (1 - probs.c.prob_1).label("prob_no_1"),
+            (1 - probs.c.prob_2).label("prob_no_2"),
+        )
+        return probs
+
+    def _get_associations_sa(self, db, reduced_query):
+        rel_freq = self._get_rel_freqs(db, reduced_query).subquery()
+        token_freq = select(reduced_query, db.freq).join(
+            db,
+            (reduced_query.comp_1 == db.comp_1) & (reduced_query.comp_2 == db.comp_2),
+        )
+        probs = self._get_probs(rel_freq, token_freq).subquery()
+        # TODO Make function under this
+        fw_kld = select(
+            probs.c.comp_1,
+            probs.c.comp_2,
+            (probs.c.prob_2_1 * func.log2(probs.c.prob_2_1 / probs.c.prob_2)).label(
+                "kld_1",
+            ),
+            case(
+                (probs.c.prob_no_2_1 == 0, 0),
+                else_=(
+                    probs.c.prob_no_2_1
+                    * func.log2(probs.c.prob_no_2_1 / (probs.c.prob_no_2))
+                ),
+            ).label("kld_2"),
+        ).subquery()
+        fw_kld = select(
+            fw_kld.c.comp_1,
+            fw_kld.c.comp_2,
+            1
+            - (func.pow(func.exp(1), -(fw_kld.c.kld_1 + fw_kld.c.kld_2))).label(
+                "fw_assoc",
+            ),
+        )
+        print(pd.read_sql(fw_kld, self._engine))
+
     def _make_associations(self, ngram_query: NgramQuery) -> None:
         """Make a table with association measures for the queried ngrams.
 
@@ -1150,26 +1331,6 @@ corpus_dir at initialization."""
         target_identifier = sql.Identifier(f"{ngram_query.target}")
         ngram_db = sql.Identifier(f"{self._ngram_db}")
         rel_freq_query = """
-            CREATE OR REPLACE TEMPORARY TABLE rel_freqs AS
-            WITH
-                source_freq AS (
-                    SELECT DISTINCT
-                        {source_id},
-                        SUM(freq) AS source_freq
-                    FROM
-                        filtered_db
-                    GROUP BY
-                        {source_id}
-            ),
-            target_freq AS (
-                SELECT DISTINCT
-                    {target_id},
-                    SUM(freq) AS target_freq
-                FROM
-                    filtered_db
-                GROUP BY
-                    {target_id}
-            )
             SELECT
                 *,
                 token_freq,
@@ -1717,7 +1878,9 @@ corpus_dir at initialization."""
             self._make_token_freq(ngram_query)
             pbar.update(1)
             logger.debug("Making reduced table...")
-            reduced_query, reduced_table = self._reduce_query(ngram_query)
+            reduced_query, reduced_table, corpus_proportions = self._reduce_query(
+                ngram_query
+            )
             pbar.update(1)
             logger.debug("Computing type frequencies...")
             if reduced_query is not None and reduced_table is not None:
@@ -1725,9 +1888,15 @@ corpus_dir at initialization."""
             # self._make_type_freq(ngram_query)
             pbar.update(1)
             logger.debug("Computing dispersion...")
-            self._make_dispersion(ngram_query)
+            self._make_dispersion_sa(
+                reduced_query,
+                reduced_table,
+                corpus_proportions,
+            )
+            # self._make_dispersion(ngram_query)
             pbar.update(1)
             logger.debug("Computing association...")
+            self._get_associations_sa(reduced_table, reduced_query)
             self._make_associations(ngram_query)
             pbar.update(1)
             logger.debug("Computing entropy...")

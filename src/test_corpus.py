@@ -2,7 +2,7 @@ from chunky.corpus_helper import Fetcher
 
 helper = Fetcher(corpus="test", make=True)
 
-print(helper.get_ngram_table())
+# print(helper.get_ngram_table())
 
 
 bigrams = ["b d", "c b", "a c"]
