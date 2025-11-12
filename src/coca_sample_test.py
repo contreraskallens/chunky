@@ -20,11 +20,11 @@ helper = Fetcher(
 # helper = Fetcher("coca_sample")
 
 
-# # sentence = (
-# #     "Hello! Come in and eat boiled potatoes they are some of the most but it was never"
-# # )
-# # x = helper.get_mwu_scores(sentence)
-# # print(x)
+sentence = (
+    "Hello! Come in and eat boiled potatoes they are some of the most but it was never"
+)
+x = helper.get_mwu_scores(sentence)
+print(x)
 print(
     helper.get_mwu_scores(
         ["Come in and eat", "I don't want to", "What do you know"],

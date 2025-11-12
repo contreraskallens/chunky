@@ -10,13 +10,12 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 from nltk import everygrams
 
-from chunky.corpus import Corpus
+from chunky.corpus import Corpus, NgramQuery
 
 logger = logging.getLogger(__name__)
 
@@ -43,30 +42,6 @@ VARIABLE_NAMES = [
 BIGRAM_LEN = 2
 TRIGRAM_LEN = 3
 FOURGRAM_LEN = 4
-
-
-@dataclass
-class NgramQuery:
-    # ? Maybe I can add the batches here?
-    """Class that gathers parameters for querying the corpus.
-
-    Must be ngrams of the same length.
-
-    Attributes:
-        ngrams list[list[str]]: A list of ngrams in list form.
-        e.g. [["this", "ngram"], ["that", "ngram"]]
-        source (str): Identifier for the first half of the ngram.
-        "ug_1" for bigrams, "big_1" for trigrams, "trig_1" for fourgrams.
-        target (str): Identifier for the second half of the ngram.
-        "ug_2" for bigrams, "ug_3" for trigrams, "ug_4" for fourgrams.
-        length (int): The length of the ngrams.
-
-    """
-
-    ngrams: list
-    source: str
-    target: str
-    length: int
 
 
 class Fetcher:
