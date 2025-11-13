@@ -1,6 +1,5 @@
 """Module for the Corpus class."""
 
-# TODO(omfgzell): Refactor functions to make them simpler #05
 # TODO(omfgzell): Exception logic #06
 # TODO(omfgzell): Type hint for kwargs #08
 # TODO(omfgzell): Test individual measure methods #11
@@ -12,35 +11,85 @@ import os
 from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import duckdb
 import pandas as pd
-import sqlalchemy as db
+import sqlalchemy as sa
 from psycopg import sql
-from sqlalchemy import (
-    MetaData,
-    PrimaryKeyConstraint,
-    Subquery,
-    Table,
-    case,
-    func,
-    inspect,
-    literal,
-    text,
-)
-from sqlalchemy.ext.automap import automap_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import orm
 from sqlalchemy.sql import select
 from tqdm import tqdm
 
 from chunky.processing_corpus import make_processed_corpus
 
-if TYPE_CHECKING:
-    from sqlalchemy.ext.declarative import DeclarativeMeta
-
 logger = logging.getLogger(__name__)
 TEMP_PATH = Path("chunky/db/temp/")
+
+Base = orm.declarative_base()
+
+
+class ReducedQuery(Base):
+    __tablename__ = "reduced_query"
+    id = sa.Column(sa.Integer, primary_key=True)
+    comp_1 = sa.Column(sa.BigInteger)
+    comp_2 = sa.Column(sa.BigInteger)
+
+
+class TokenFreq(Base):
+    __tablename__ = "token_freq"
+    comp_1 = sa.Column(sa.BigInteger, primary_key=True)
+    comp_2 = sa.Column(sa.BigInteger, primary_key=True)
+    token_freq = sa.Column(sa.Double)
+
+
+class QueryRef(Base):
+    __tablename__ = "query_ref"
+    id = sa.Column(sa.Integer, primary_key=True)
+    comp_1 = sa.Column(sa.String)
+    comp_2 = sa.Column(sa.String)
+    comp_1_hash = sa.Column(sa.BigInteger)
+    comp_2_hash = sa.Column(sa.BigInteger)
+
+
+def create_corpus_proportions(corpus_cols: list) -> tuple:
+    """Create ORM class with dynamic columns."""
+    base = orm.declarative_base()
+
+    # Build class attributes
+    attrs = {
+        "__tablename__": "corpus_proportions",
+        "id": sa.Column(sa.Integer, primary_key=True),
+    }
+    # Add dynamic sum columns
+    for col_name in corpus_cols:
+        attrs[f"{col_name}"] = sa.Column(sa.Double)
+
+    # Create class dynamically
+    corpus_proportions = type("corpus_proportions", (base,), attrs)
+
+    return corpus_proportions, base
+
+
+def create_filtered_db(corpus_cols: list) -> tuple:
+    """Create ORM class with dynamic columns."""
+    base = orm.declarative_base()
+
+    # Build class attributes
+    attrs = {
+        "__tablename__": "filtered_db",
+        "comp_1": sa.Column(sa.Integer, primary_key=True),
+        "comp_2": sa.Column(sa.Integer, primary_key=True),
+        "freq": sa.Column(sa.Double),
+    }
+    # Add dynamic sum columns
+    for col_name in corpus_cols:
+        attrs[f"{col_name}"] = sa.Column(sa.Double)
+
+    # Create class dynamically
+    filtered_db = type("FilteredDB", (base,), attrs)
+
+    return filtered_db, base
 
 
 @dataclass
@@ -61,12 +110,11 @@ class NgramQuery:
 
     """
 
-    query: Any
-    freq_table: Any
-    total_proportions: Any
-    full_query: Any
-    results: Any
-    query_ref: Any
+    query: type[orm.DeclarativeBase]
+    freq_table: type[orm.DeclarativeBase]
+    total_proportions: type[orm.DeclarativeBase]
+    results: Any  # Messy with the CTE stuff. Leave it as Any.
+    query_ref: type[orm.DeclarativeBase]
     ngrams: list
     source: str
     target: str
@@ -83,27 +131,20 @@ class NgramQuery:
         self.source = source
         self.target = target
         self.length = length
-        self.full_query = None
-        self.total_proportions = None
-        self.freq_table = None
-        self.query = None
-        self.results = None
-        self.query_ref = None
 
-    def update_results(
-        self,
-        new_results: Any,
-    ) -> None:
+    def update_results(self, new_results: sa.Selectable) -> None:
         self.results = new_results
-        if not isinstance(self.results, Subquery):
-            self.results = self.results.subquery()
+        if isinstance(self.results, sa.HasCTE):
+            self.results = self.results.cte()
 
 
-def get_column(table, column):
-    if isinstance(table, Subquery) or isinstance(table, Table):
+def get_column(
+    table: sa.Selectable | type[orm.DeclarativeBase],
+    column: str,
+) -> sa.Column:
+    if isinstance(table, (sa.Subquery, sa.Table, sa.CTE)):
         return getattr(table.c, column)
-    else:
-        return getattr(table, column)
+    return getattr(table, column)
 
 
 class Corpus:
@@ -158,28 +199,10 @@ class Corpus:
         """
         self.corpus_name = corpus_name
         self._path = Path(f"chunky/db/{corpus_name}.db")
-        self._engine = db.create_engine(
+        self._engine = sa.create_engine(
             f"duckdb:///{self._path}",
             echo=False,
         )
-        session_maker = sessionmaker(bind=self._engine)
-        self._session = session_maker()
-
-        # print(repr(self._session))
-        # metadata = db.MetaData()
-        # self._db = db.Table(
-        #     "unigram_db",
-        #     metadata,
-        # )
-        # print(repr(self._db))
-        # # print(self._engine.connect().execute(self._db.select()).fetchall())
-        # self._session = Session(self._engine)
-        # print(self._engine)
-        # with self._session as session:
-        #     result = session.execute(text("SELECT * FROM unigram_db LIMIT 100"))
-        #     for row in result:
-        #         print(row)
-
         self._temp = TEMP_PATH
         if not self._temp.exists():
             self._temp.mkdir(parents=True)
@@ -272,24 +295,8 @@ corpus_dir at initialization."""
             frequency table.
 
         """
-        with duckdb.connect(self._path) as conn:
-            ngram_db_query = """
-                            SELECT
-                                *
-                            FROM
-                                {}
-                            LIMIT
-                                {}
-                            """
-            ngram_db_query = (
-                sql.SQL(ngram_db_query)
-                .format(
-                    f"{self._ngram_db}",
-                    limit,
-                )
-                .as_string()
-            )
-            return conn.execute(ngram_db_query).df()
+        ngram_db_query = f"SELECT * FROM {self._ngram_db} LIMIT {limit}"
+        return pd.read_sql(ngram_db_query, self._engine)
 
     def df(self, query: str, params: list | dict | None = None) -> pd.DataFrame:
         """Query the database and return as dataframe.
@@ -304,6 +311,7 @@ corpus_dir at initialization."""
 
         Returns:
             pd.DataFrame: A pandas Dataframe containing the results of the query.
+
         """
         with duckdb.connect(self._path) as conn:
             if not params:
@@ -676,70 +684,38 @@ corpus_dir at initialization."""
                 ngram_query.target,
             ],
         )
-        source_identifier = sql.Identifier(f"{ngram_query.source}")
-        source_hash_identifier = sql.Identifier(f"{ngram_query.source}_hash")
-        target_identifier = sql.Identifier(f"{ngram_query.target}")
-        target_hash_identifier = sql.Identifier(f"{ngram_query.target}_hash")
-        with duckdb.connect(self._path) as conn:
-            conn.register("query_df", query_df)
+
+        with self._engine.connect() as conn:
             conn.execute(
-                sql.SQL("""
+                sa.text("register(:name, :df)"),
+                {"name": "query_df", "df": query_df},
+            )
+            query_ref_create = """
                 CREATE OR REPLACE TABLE query_ref (
                     id INT,
-                    {source_id} TEXT,
-                    {target_id} TEXT,
-                    {source_hash} UINT64,
-                    {target_hash} UINT64
+                    comp_1 TEXT,
+                    comp_2 TEXT,
+                    comp_1_hash UINT64,
+                    comp_2_hash UINT64
                 )
-                """)
-                .format(
-                    source_id=source_identifier,
-                    target_id=target_identifier,
-                    source_hash=source_hash_identifier,
-                    target_hash=target_hash_identifier,
-                )
-                .as_string(),
-            )
-            conn.execute(
-                sql.SQL("""
+                """
+            conn.execute(sa.text(query_ref_create))
+            query_ref_insert = f"""
                 INSERT INTO
                     query_ref
                 SELECT
-                    row_number() OVER () as id,
-                    {source_id},
-                    {target_id},
-                    HASH({source_id}) AS {source_hash},
-                    HASH({target_id}) AS {target_hash}
+                    row_number() OVER () AS id,
+                    {ngram_query.source} AS comp_1,
+                    {ngram_query.target} AS comp_2,
+                    HASH({ngram_query.source}) AS comp_1_hash,
+                    HASH({ngram_query.target}) AS comp_2_hash
                 FROM
                     query_df
-            """)
-                .format(
-                    source_id=source_identifier,
-                    target_id=target_identifier,
-                    source_hash=source_hash_identifier,
-                    target_hash=target_hash_identifier,
-                )
-                .as_string(),
-            )
-            conn.execute(
-                sql.SQL("""
-                CREATE OR REPLACE TABLE this_query AS (
-                    SELECT
-                        {source_hash} AS {source_id},
-                        {target_hash} AS {target_id}
-                FROM
-                    query_ref
-            )""")
-                .format(
-                    source_id=source_identifier,
-                    target_id=target_identifier,
-                    source_hash=source_hash_identifier,
-                    target_hash=target_hash_identifier,
-                )
-                .as_string(),
-            )
+            """
+            conn.execute(sa.text(query_ref_insert))
+            conn.commit()
 
-    def _make_token_freq(self, ngram_query: NgramQuery) -> None:
+    def _get_token_freq(self, ngram_query: NgramQuery) -> sa.Select:
         """Make a table with token frequencies for the queried ngrams.
 
         This is required by all other supported measures.
@@ -749,52 +725,28 @@ corpus_dir at initialization."""
             and source/target information.
 
         """
-        source_identifier = sql.Identifier(f"{ngram_query.source}")
-        target_identifier = sql.Identifier(f"{ngram_query.target}")
-        ngram_db = sql.Identifier(f"{self._ngram_db}")
-        token_freq_query = """
+
+        token_freq_query = f"""
         CREATE OR REPLACE TABLE token_freq AS
         SELECT
-            {source_id},
-            {target_id},
+            query_ref.comp_1_hash AS comp_1,
+            query_ref.comp_2_hash AS comp_2,
             SUM(freq) AS token_freq
         FROM
-            this_query
-        INNER JOIN {ngram_db} USING({source_id}, {target_id})
+            query_ref
+        INNER JOIN READ_PARQUET('{self._ngram_db}')
+            ON query_ref.comp_1_hash = {ngram_query.source}
+            AND query_ref.comp_2_hash = {ngram_query.target}
         GROUP BY
-            {source_id}, {target_id}
-                """  # noqa: S105
-        token_freq_query = (
-            sql.SQL(token_freq_query)
-            .format(
-                source_id=source_identifier,
-                target_id=target_identifier,
-                ngram_db=ngram_db,
-            )
-            .as_string()
-        )
-        with duckdb.connect(self._path) as conn:
-            conn.execute(token_freq_query)
-        # After getting token freq, we can filter non-occurring ngrams from the query
-
-    def get_token_freq(self, ngram_query: NgramQuery) -> pd.DataFrame:
-        """Obtain a table with ngram token frequency.
-
-        Args:
-            ngram_query (NgramQuery): An NgramQuery object containing ngrams and
-            source/target information. See NgramQuery documentation for details.
-
-        Returns:
-            pd.DataFrame: A pandas DataFrame containing token frequency information
-            for all queried ngrams.
-
-        """
-        self._create_query(ngram_query)
-        self._make_token_freq(ngram_query)
-        return self.df("SELECT * FROM token_freq")
+            query_ref.comp_1_hash, query_ref.comp_2_hash
+                """
+        with self._engine.connect() as conn:
+            conn.execute(sa.text(token_freq_query))
+            conn.commit()
+        return select(TokenFreq)
 
     def _reduce_query(self, ngram_query: NgramQuery) -> NgramQuery:
-        """Make a reduced query table that includes only the occurring ngrams.
+        """Make a reduced query table that includes only ngrams with token_freq > 0.
 
         This is a substantial memory and runtime save for later operations. It
         eliminates from the query all ngrams that do not occur in the corpus.
@@ -804,47 +756,37 @@ corpus_dir at initialization."""
             source/target information.
 
         """
-        source_identifier = sql.Identifier(f"{ngram_query.source}")
-        target_identifier = sql.Identifier(f"{ngram_query.target}")
-        ngram_db = sql.Identifier(f"{self._ngram_db}")
+        token_freq = TokenFreq
+        query = QueryRef
 
-        reduce_query = (
-            sql.SQL("""
-            CREATE OR REPLACE TABLE reduced_query AS
-            SELECT
-                row_number() OVER () as id,
-                {source_id} AS comp_1,
-                {target_id} AS comp_2
-            FROM
-                this_query
-                SEMI JOIN token_freq USING({source_id}, {target_id})
-            ORDER BY comp_1, comp_2
-            """)
-            .format(
-                source_id=source_identifier,
-                target_id=target_identifier,
-            )
-            .as_string()
+        reduced_query = select(
+            query.comp_1_hash.label("comp_1"),
+            query.comp_2_hash.label("comp_2"),
+        ).where(
+            sa.exists().where(
+                (token_freq.comp_1 == query.comp_1_hash)
+                & (token_freq.comp_2 == query.comp_2_hash),
+            ),
         )
-        filter_query = (
-            sql.SQL("""
+
+        filter_query = f"""
                 CREATE OR REPLACE TABLE filtered_db AS
                 SELECT
-                    {source_id} AS comp_1,
-                    {target_id} AS comp_2,
+                    {ngram_query.source} AS comp_1,
+                    {ngram_query.target} AS comp_2,
                     SUM(
                         COLUMNS(* EXCLUDE(ug_1, ug_2, ug_3, ug_4, big_1, trig_1))
                     )
                 FROM
-                    READ_PARQUET({ngram_db})
+                    READ_PARQUET('{self._ngram_db}')
                 WHERE
-                    {source_id} IN (
+                    {ngram_query.source} IN (
                         SELECT
                             comp_1
                         FROM
-                            reduced_query
+                            token_freq
                     )
-                    OR {target_id} IN (
+                    OR {ngram_query.target} IN (
                         SELECT
                             comp_2
                         FROM
@@ -853,70 +795,34 @@ corpus_dir at initialization."""
                 GROUP BY
                     comp_1,
                     comp_2
-                """)
-            .format(
-                source_id=source_identifier,
-                target_id=target_identifier,
-                ngram_db=ngram_db,
-            )
-            .as_string()
-        )
-        with duckdb.connect(self._path) as conn:
-            conn.execute(reduce_query)
-            conn.execute("ANALYZE reduced_query")
-            conn.execute(filter_query)
-            conn.execute("ALTER TABLE filtered_db ADD PRIMARY KEY (comp_1, comp_2)")
-            conn.execute("ALTER TABLE reduced_query ADD PRIMARY KEY (id)")
-            conn.execute("ALTER TABLE query_ref ADD PRIMARY KEY (id)")
-
-        metadata = MetaData()
-        metadata.reflect(bind=self._engine)
-
-        filtered_table = metadata.tables["filtered_db"]
-
-        if not filtered_table.primary_key or not filtered_table.primary_key.columns:
-            filtered_table.append_constraint(
-                PrimaryKeyConstraint(filtered_table.c.comp_1, filtered_table.c.comp_2),
-            )
-
-        reduced_query = metadata.tables["reduced_query"]
-
-        if not reduced_query.primary_key or not reduced_query.primary_key.columns:
-            reduced_query.append_constraint(
-                PrimaryKeyConstraint(reduced_query.c.id),
-            )
-        query_ref = metadata.tables["query_ref"]
-
-        if not query_ref.primary_key or not query_ref.primary_key.columns:
-            query_ref.append_constraint(
-                PrimaryKeyConstraint(query_ref.c.id),
-            )
-        corpus_proportions = metadata.tables["corpus_proportions"]
-        if (
-            not corpus_proportions.primary_key
-            or not corpus_proportions.primary_key.columns
-        ):
-            corpus_proportions.append_constraint(
-                PrimaryKeyConstraint(corpus_proportions.c.id),
-            )
-
-        base = automap_base(metadata=metadata)
-        base.prepare()
-
-        ngram_query.query = base.classes.reduced_query
-        ngram_query.results = ngram_query.query
-        ngram_query.freq_table = base.classes.filtered_db
+                """
+        with self._engine.connect() as conn:
+            conn.execute(sa.text(filter_query))
+            conn.commit()
+            parquet_columns = conn.execute(
+                sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')")
+            ).fetchall()
+        corpus_columns = [
+            column[0]
+            for column in parquet_columns
+            if column[0] not in ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
+        ]
+        filtered_db, _ = create_filtered_db(corpus_columns)
+        corpus_proportions, _ = create_corpus_proportions(corpus_columns)
+        ngram_query.query = reduced_query
+        ngram_query.results = reduced_query
+        ngram_query.freq_table = filtered_db
         ngram_query.total_proportions = corpus_proportions
-        ngram_query.query_ref = query_ref
+        ngram_query.query_ref = query
         return ngram_query
 
     def _join_with_query(
         self,
-        query_table,
-        result_table,
+        query_table: sa.CTE,
+        result_table: sa.CTE,
         result_name: str,
         alt_name: str | None = None,
-    ):
+    ) -> sa.Select:
         if alt_name is None:
             select_statement = select(
                 query_table,
@@ -945,16 +851,16 @@ corpus_dir at initialization."""
         db = ngram_query.freq_table
         type_1_query = select(
             get_column(db, "comp_2"),
-            func.count().label("typef_1"),
+            sa.func.count().label("typef_1"),
         )
         type_1_query = type_1_query.group_by(get_column(db, "comp_2"))
-        type_1_query = type_1_query.subquery()
+        type_1_query = type_1_query.cte()
         type_2_query = select(
             get_column(db, "comp_1"),
-            func.count().label("typef_2"),
+            sa.func.count().label("typef_2"),
         )
         type_2_query = type_2_query.group_by(get_column(db, "comp_1"))
-        type_2_query = type_2_query.subquery()
+        type_2_query = type_2_query.cte()
         results = select(
             reduced_query,
             get_column(type_1_query, "typef_1"),
@@ -971,28 +877,28 @@ corpus_dir at initialization."""
 
     def _get_prop_columns(
         self,
-        corpus_columns,
-        freq_column,
-    ):
+        corpus_columns: list,
+        freq_column: sa.Column,
+    ) -> list[sa.Column]:
         return [(column / freq_column).label(column.name) for column in corpus_columns]
 
     def _get_kld(
         self,
-        column_1,
-        column_2,
-    ):
-        return case(
+        column_1: sa.Column,
+        column_2: sa.Column | sa.ScalarSelect,
+    ) -> sa.Case:
+        return sa.case(
             ((column_1 == 0) | (column_2 == 0), 0),
-            else_=column_1 * func.log2(column_1 / column_2),
+            else_=column_1 * sa.func.log2(column_1 / column_2),
         )
 
     def _get_distances(
         self,
         prop_columns: list,
-        all_corpus_props,
-    ):
+        all_corpus_props: type[orm.DeclarativeBase],
+    ) -> list[sa.ColumnElement]:
         # distance to corpus proportion
-        mapper_all = inspect(all_corpus_props)
+        mapper_all = sa.inspect(all_corpus_props)
         # Use scalar_subquery because corpus_proportion.X always has length=1
         return [
             self._get_kld(
@@ -1002,18 +908,18 @@ corpus_dir at initialization."""
             for column in prop_columns
         ]
 
-    def _sum_rows(self, columns):
+    def _sum_rows(self, columns: list) -> sa.Column:
         return reduce(lambda x, y: x + y, columns)
 
-    def _normalize_kld(self, column):
-        return 1 - func.pow(func.exp(1), -column)
+    def _normalize_kld(self, column: sa.Column | sa.ColumnElement) -> sa.ColumnElement:
+        return 1 - sa.func.pow(sa.func.exp(1), -column)
 
     def _get_dispersion_column(
         self,
-        corpus_columns,
-        freqs,
-        corpus_proportions,
-    ):
+        corpus_columns: list,
+        freqs: sa.Column,
+        corpus_proportions: type[orm.DeclarativeBase],
+    ) -> sa.ColumnElement:
         prop_columns = self._get_prop_columns(corpus_columns, freqs)
         distance_columns = self._get_distances(prop_columns, corpus_proportions)
         kld_column = self._sum_rows(distance_columns)
@@ -1040,7 +946,7 @@ corpus_dir at initialization."""
             & (get_column(reduced_query, "comp_2") == get_column(db, "comp_2")),
         )
 
-        reduced_table = reduced_table.subquery()
+        reduced_table = reduced_table.cte()
 
         dispersion_table = select(
             get_column(reduced_table, "comp_1"),
@@ -1055,7 +961,7 @@ corpus_dir at initialization."""
                 corpus_proportions,
             ).label("dispersion"),
         )
-        dispersion_table = dispersion_table.subquery()
+        dispersion_table = dispersion_table.cte()
         results = self._join_with_query(
             reduced_query,
             dispersion_table,
@@ -1065,22 +971,23 @@ corpus_dir at initialization."""
 
     def _get_rel_freqs(
         self,
-        db,
-        reduced_query,
-    ):
+        db: type[orm.DeclarativeBase],
+        reduced_query: ReducedQuery | sa.Selectable,
+    ) -> sa.Selectable:
         source_freq = select(
             get_column(db, "comp_1"),
-            func.sum(get_column(db, "freq")).label("source_freq"),
+            sa.func.sum(get_column(db, "freq")).label("source_freq"),
         ).group_by(get_column(db, "comp_1"))
-        source_freq = source_freq.subquery()
+        source_freq = source_freq.cte()
         target_freq = select(
             get_column(db, "comp_2"),
-            func.sum(get_column(db, "freq")).label("target_freq"),
+            sa.func.sum(get_column(db, "freq")).label("target_freq"),
         ).group_by(get_column(db, "comp_2"))
-        target_freq = target_freq.subquery()
-        total_freq = self._session.execute(
-            text("SELECT SUM(freq) AS total_freq FROM unigram_db"),
-        ).fetchone()
+        target_freq = target_freq.cte()
+        with self._engine.connect() as conn:
+            total_freq = conn.execute(
+                sa.text("SELECT SUM(freq) AS total_freq FROM unigram_db"),
+            ).fetchone()
         if total_freq is not None:
             total_freq = total_freq[0]
         else:
@@ -1088,7 +995,7 @@ corpus_dir at initialization."""
             raise RuntimeError(exception_msg)
         rel_freqs = select(
             reduced_query,
-            literal(total_freq).label("total_freq"),
+            sa.literal(total_freq).label("total_freq"),
             get_column(source_freq, "source_freq"),
             get_column(target_freq, "target_freq"),
         )
@@ -1103,32 +1010,40 @@ corpus_dir at initialization."""
 
     def _get_probs(
         self,
-        rel_freq,
-        token_freq,
-    ):
-        token_freq = token_freq.subquery()
-        rel_freq = select(rel_freq, get_column(token_freq, "freq")).join(
-            token_freq,
-            (get_column(rel_freq, "comp_1") == get_column(token_freq, "comp_1"))
-            & (get_column(rel_freq, "comp_2") == get_column(token_freq, "comp_2")),
+        rel_freq: sa.CTE,
+        token_freq: sa.Select,
+    ) -> sa.Select:
+        token_freq_cte = token_freq.cte()
+        filtered_rel_freq = select(rel_freq, get_column(token_freq_cte, "freq")).join(
+            token_freq_cte,
+            (get_column(rel_freq, "comp_1") == get_column(token_freq_cte, "comp_1"))
+            & (get_column(rel_freq, "comp_2") == get_column(token_freq_cte, "comp_2")),
         )
-        rel_freq = rel_freq.subquery()
+        filtered_rel_freq = filtered_rel_freq.cte()
         probs = select(
-            get_column(rel_freq, "comp_1"),
-            get_column(rel_freq, "comp_2"),
-            (get_column(rel_freq, "freq") / get_column(rel_freq, "source_freq")).label(
+            get_column(filtered_rel_freq, "comp_1"),
+            get_column(filtered_rel_freq, "comp_2"),
+            (
+                get_column(filtered_rel_freq, "freq")
+                / get_column(filtered_rel_freq, "source_freq")
+            ).label(
                 "prob_2_1",
             ),
-            (get_column(rel_freq, "freq") / get_column(rel_freq, "target_freq")).label(
+            (
+                get_column(filtered_rel_freq, "freq")
+                / get_column(filtered_rel_freq, "target_freq")
+            ).label(
                 "prob_1_2",
             ),
             (
-                get_column(rel_freq, "source_freq") / get_column(rel_freq, "total_freq")
+                get_column(filtered_rel_freq, "source_freq")
+                / get_column(filtered_rel_freq, "total_freq")
             ).label("prob_1"),
             (
-                get_column(rel_freq, "target_freq") / get_column(rel_freq, "total_freq")
+                get_column(filtered_rel_freq, "target_freq")
+                / get_column(filtered_rel_freq, "total_freq")
             ).label("prob_2"),
-        ).subquery()
+        ).cte()
         return select(
             probs,
             (1 - get_column(probs, "prob_2_1")).label("prob_no_2_1"),
@@ -1141,7 +1056,7 @@ corpus_dir at initialization."""
         self,
         pair_1: tuple,
         pair_2: tuple,
-    ):
+    ) -> sa.ColumnElement:
         kld_1 = self._get_kld(*pair_1)
         kld_2 = self._get_kld(*pair_2)
         return self._normalize_kld(kld_1 + kld_2)
@@ -1149,13 +1064,13 @@ corpus_dir at initialization."""
     def _get_associations_sa(self, ngram_query: NgramQuery) -> None:
         reduced_query = ngram_query.results
         db = ngram_query.freq_table
-        rel_freq = self._get_rel_freqs(db, reduced_query).subquery()
-        token_freq = select(reduced_query, db.freq).join(
+        rel_freq = self._get_rel_freqs(db, reduced_query).cte()  # pyright: ignore[reportAttributeAccessIssue]
+        token_freq = select(reduced_query, get_column(db, "freq")).join(
             db,
             (get_column(reduced_query, "comp_1") == get_column(db, "comp_1"))
             & (get_column(reduced_query, "comp_2") == get_column(db, "comp_2")),
         )
-        probs = self._get_probs(rel_freq, token_freq).subquery()
+        probs = self._get_probs(rel_freq, token_freq).cte()
         fw_assoc = self._get_normalized_kld(
             (get_column(probs, "prob_2_1"), get_column(probs, "prob_2")),
             (get_column(probs, "prob_no_2_1"), get_column(probs, "prob_no_2")),
@@ -1171,13 +1086,13 @@ corpus_dir at initialization."""
             fw_assoc.label("fw_assoc"),
             bw_assoc.label("bw_assoc"),
         )
-        assoc_table = assoc_table.subquery()
+        assoc_table = assoc_table.cte()
         results = self._join_with_query(
             reduced_query,
             assoc_table,
             "fw_assoc",
         )
-        results = results.subquery()
+        results = results.cte()
         results = self._join_with_query(
             results,
             assoc_table,
@@ -1187,12 +1102,12 @@ corpus_dir at initialization."""
 
     def _get_total_freq(
         self,
-        reduced_query,
-        db,
-        column,
+        reduced_query: sa.Select | sa.Selectable,
+        db: type[orm.DeclarativeBase] | sa.CTE,
+        column: str,
         *,
         cf: bool = False,
-    ):
+    ) -> sa.Select:
         id_columns = [get_column(db, "comp_1"), get_column(db, "comp_2")]
         if cf:
             id_columns.append(get_column(db, "target"))
@@ -1200,15 +1115,15 @@ corpus_dir at initialization."""
             *id_columns,
             get_column(db, "freq"),
         ).where(get_column(db, column).in_(select(get_column(reduced_query, column))))
-        token_freq = token_freq.subquery()
+        token_freq = token_freq.cte()
         id_columns = [get_column(token_freq, column)]
         if cf:
             id_columns.append(get_column(token_freq, "target"))
         total_freq = select(
             *id_columns,
-            func.sum(get_column(token_freq, "freq")).label("total_freq"),
+            sa.func.sum(get_column(token_freq, "freq")).label("total_freq"),
         ).group_by(*id_columns)
-        total_freq = total_freq.subquery()
+        total_freq = total_freq.cte()
         if cf:
             return select(
                 token_freq,
@@ -1233,97 +1148,98 @@ corpus_dir at initialization."""
 
     def _get_info(
         self,
-        freqs,
-        total_freqs,
-    ):
+        freqs: sa.Column,
+        total_freqs: sa.ColumnElement,
+    ) -> sa.ColumnElement:
         prob = freqs / total_freqs
-        info = func.log2(prob)
+        info = sa.func.log2(prob)
         return prob * info
 
     def _get_entropy(
         self,
-        reduced_query,
-        db,
+        reduced_query: sa.Select | sa.Selectable,
+        db: type[orm.DeclarativeBase] | sa.CTE,
         source_column: str,
         *,
         cf: bool = False,
-    ):
+    ) -> sa.Select:
         if cf:
             total_freq = self._get_total_freq(reduced_query, db, source_column, cf=True)
         else:
             total_freq = self._get_total_freq(reduced_query, db, source_column)
-        total_freq = total_freq.subquery()
+        total_freq = total_freq.cte()
 
         weighted_info = select(
             total_freq,
             self._get_info(
-                total_freq.c.freq,
-                total_freq.c.total_freq,
+                get_column(total_freq, "freq"),
+                get_column(total_freq, "total_freq"),
             ).label("weighted_info"),
         )
-        weighted_info = weighted_info.subquery()
+        weighted_info = weighted_info.cte()
         wi_id_columns = [get_column(weighted_info, source_column)]
         if cf:
             wi_id_columns.append(get_column(weighted_info, "target"))
         entropy = select(
             *wi_id_columns,
-            (-func.sum(weighted_info.c.weighted_info)).label("raw_entropy"),
-            func.count(weighted_info.c.weighted_info).label("n"),
+            (-sa.func.sum(weighted_info.c.weighted_info)).label("raw_entropy"),
+            sa.func.count(weighted_info.c.weighted_info).label("n"),
         ).group_by(*wi_id_columns)
-        entropy = entropy.subquery()
+        entropy = entropy.cte()
 
         ent_id_columns = [get_column(entropy, source_column)]
         if cf:
             ent_id_columns.append(get_column(entropy, "target"))
         return select(
             *ent_id_columns,
-            (entropy.c.raw_entropy / func.log2(entropy.c.n)).label("entropy"),
+            (entropy.c.raw_entropy / sa.func.log2(entropy.c.n)).label("entropy"),
         )
 
     def _get_mult_table(
         self,
-        reduced_query,
-        db,
-        source_column,
-        target_column,
-    ):
+        reduced_query: sa.Selectable,
+        db: type[orm.DeclarativeBase]
+        | sa.CTE,  # DeclarativeBase for original CTE for CF
+        source_column: str,
+        target_column: str,
+    ) -> sa.Select:
         mult_table = select(
             get_column(reduced_query, source_column).label(source_column),
             get_column(reduced_query, target_column).label("target"),
             get_column(db, target_column).label(target_column),
-            db.freq,
+            get_column(db, "freq"),
         ).join(
             db,
             (get_column(reduced_query, source_column) == get_column(db, source_column)),
         )
-        mult_table = mult_table.subquery()
+        mult_table = mult_table.cte()
         return select(mult_table).where(
             mult_table.c.target != get_column(mult_table, target_column),
         )
 
     def _get_entropy_diff(
         self,
-        entropy_real,
-        entropy_cf,
+        entropy_real: sa.Select,
+        entropy_cf: sa.Select,
         source_column: str,
         target_column: str,
-    ):
-        entropy_real = entropy_real.subquery()
-        entropy_cf = entropy_cf.subquery()
+    ) -> sa.Select:
+        entropy_real_cte = entropy_real.cte()
+        entropy_cf_cte = entropy_cf.cte()
 
         both_entropy = select(
-            get_column(entropy_cf, source_column),
-            get_column(entropy_cf, "target").label(target_column),
-            entropy_real.c.entropy.label("entropy_real"),
-            entropy_cf.c.entropy.label("entropy_cf"),
+            get_column(entropy_cf_cte, source_column),
+            get_column(entropy_cf_cte, "target").label(target_column),
+            entropy_real_cte.c.entropy.label("entropy_real"),
+            entropy_cf_cte.c.entropy.label("entropy_cf"),
         ).join(
-            entropy_real,
+            entropy_real_cte,
             (
-                get_column(entropy_cf, source_column)
-                == get_column(entropy_real, source_column)
+                get_column(entropy_cf_cte, source_column)
+                == get_column(entropy_real_cte, source_column)
             ),
         )
-        both_entropy = both_entropy.subquery()
+        both_entropy = both_entropy.cte()
         return select(
             get_column(both_entropy, source_column),
             get_column(both_entropy, target_column),
@@ -1334,18 +1250,18 @@ corpus_dir at initialization."""
 
     def _get_entropy_sa(
         self,
-        reduced_query,
-        db,
-        source_column,
-        target_column,
-    ):
+        reduced_query: sa.Selectable,
+        db: type[orm.DeclarativeBase],
+        source_column: str,
+        target_column: str,
+    ) -> sa.Select:
         mult_table = self._get_mult_table(
             reduced_query,
             db,
             source_column,
             target_column,
         )
-        mult_table = mult_table.subquery()
+        mult_table = mult_table.cte()
         entropy_real = self._get_entropy(reduced_query, db, source_column)
         entropy_cf = self._get_entropy(
             reduced_query,
@@ -1364,9 +1280,9 @@ corpus_dir at initialization."""
         reduced_query = ngram_query.results
         db = ngram_query.freq_table
         entropy_1 = self._get_entropy_sa(reduced_query, db, "comp_2", "comp_1")
-        entropy_1 = entropy_1.subquery()
+        entropy_1 = entropy_1.cte()
         entropy_2 = self._get_entropy_sa(reduced_query, db, "comp_1", "comp_2")
-        entropy_2 = entropy_2.subquery()
+        entropy_2 = entropy_2.cte()
 
         results = self._join_with_query(
             reduced_query,
@@ -1374,7 +1290,7 @@ corpus_dir at initialization."""
             "entropy_diff",
             alt_name="entropy_1",
         )
-        results = results.subquery()
+        results = results.cte()
         results = self._join_with_query(
             results,
             entropy_2,
@@ -1398,24 +1314,18 @@ corpus_dir at initialization."""
         results = ngram_query.results
 
         results = select(
-            get_column(query_ref, ngram_query.source).label("comp_1"),
-            get_column(query_ref, ngram_query.target).label("comp_2"),
+            get_column(query_ref, "comp_1"),
+            get_column(query_ref, "comp_2"),
             *[
                 get_column(results, column.name)
                 for column in results.c
                 if column.name not in ["id", "comp_1", "comp_2"]
             ],
-            literal(ngram_query.length).label("ngram_length"),
+            sa.literal(ngram_query.length).label("ngram_length"),
         ).join(
             results,
-            (
-                get_column(query_ref, ngram_query.source + "_hash")
-                == get_column(results, "comp_1")
-            )
-            & (
-                get_column(query_ref, ngram_query.target + "_hash")
-                == get_column(results, "comp_2")
-            ),
+            (get_column(query_ref, "comp_1_hash") == get_column(results, "comp_1"))
+            & (get_column(query_ref, "comp_2_hash") == get_column(results, "comp_2")),
         )
         ngram_query.update_results(results)
 
@@ -1430,10 +1340,11 @@ corpus_dir at initialization."""
         with tqdm(total=8, unit="step", leave=True) as pbar:
             pbar.update(1)
             logger.debug("Computing token frequencies...")
-            self._make_token_freq(ngram_query)
+            token_freq = self._get_token_freq(ngram_query)
             pbar.update(1)
             logger.debug("Making reduced table...")
             ngram_query = self._reduce_query(ngram_query)
+            ngram_query.update_results(token_freq)
             pbar.update(1)
             logger.debug("Computing type frequencies...")
             self._get_type_freq_sa(ngram_query)
@@ -1449,7 +1360,6 @@ corpus_dir at initialization."""
             pbar.update(1)
             logger.debug("Joining results...")
             self._join_measures(ngram_query)
-            print(pd.read_sql(select(ngram_query.results), self._engine))
             pbar.update(1)
             return ngram_query
 
@@ -1472,4 +1382,6 @@ corpus_dir at initialization."""
         """
         self._create_query(ngram_query)
         ngram_query = self._get_all_scores(ngram_query)
-        return ngram_query.results
+        with self._engine.connect() as conn:
+            results = conn.execute(select(ngram_query.results)).fetchall()
+        return pd.DataFrame(results)
