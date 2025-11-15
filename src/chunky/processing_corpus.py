@@ -11,12 +11,13 @@ import string
 from itertools import groupby
 from pathlib import Path
 
-from . import corpus, preprocessing_corpus
+from . import create_corpus as create
+from . import preprocessing_corpus as preprocess
 
 logger = logging.getLogger(__name__)
 
 
-def _process_test(corpus: corpus.Corpus) -> None:
+def _process_test() -> dict:
     """Build the test corpus.
 
     Processes the test corpus from Gries' original publication and
@@ -26,12 +27,11 @@ def _process_test(corpus: corpus.Corpus) -> None:
         corpus (corpus.Corpus): A Corpus object that's been already initialized.
 
     """
-    ngram_dicts = preprocessing_corpus.preprocess_corpus(corpus="test")
-    corpus.add_chunk(ngram_dicts)
+    return preprocess.preprocess_corpus(corpus="test")
 
 
 def _process_bnc(
-    corpus: corpus.Corpus,
+    corpus_path: Path,
     corpus_dir: Path,
     chunk_size: int = 1000000,
 ) -> None:
@@ -42,7 +42,7 @@ def _process_bnc(
     up the process.
 
     Args:
-        corpus (corpus.Corpus): An initialized Corpus object.
+        corpus_path (Path): The path to the database.
         corpus_dir (Path): The directory where the BNC corpus file is located.
         The function is prepared to work with bnc_tokenized.txt.
         chunk_size (int, optional): The number of lines to process at once.
@@ -55,11 +55,11 @@ def _process_bnc(
             raw_lines = corpus_file.readlines(chunk_size)
             if not raw_lines:
                 break
-            ngram_dicts = preprocessing_corpus.preprocess_corpus(
+            ngram_dicts = preprocess.preprocess_corpus(
                 corpus="bnc",
                 raw_lines=raw_lines,
             )
-            corpus.add_chunk(ngram_dicts)
+            create.add_chunk(path=corpus_path, ngrams=ngram_dicts)
             i += len(raw_lines)
             logger.debug("%s lines processed", i)
 
@@ -103,7 +103,7 @@ def _prepare_coca(corpus_dir: Path) -> tuple:
 
 
 def _process_coca(
-    corpus: corpus.Corpus,
+    corpus_path: Path,
     cat_chunk: list,
     cat_name: str,
     corpus_ids: dict,
@@ -115,9 +115,8 @@ def _process_coca(
     and then add them to a Corpus object.
 
     Args:
-        corpus (corpus.Corpus): A Corpus object.
+        corpus_path (Path): The path to the database.
         cat_chunk (list): Chunk of texts for a CoCA subcorpus
-        #TODO!  Check that this is true
         cat_name (str): Name of the subcorpus as a file path.
         corpus_ids (dict): Ids of the corpora, e.g. {"academic": "A"}
         chunk_size (int, optional): Number of texts to process at once.
@@ -138,20 +137,21 @@ def _process_coca(
             with coca_text.open() as corpus_file:
                 raw_lines = corpus_file.read()
             chunk_text = chunk_text + " \n " + raw_lines
-        ngram_dicts = preprocessing_corpus.preprocess_corpus(
+        ngram_dicts = preprocess.preprocess_corpus(
             raw_lines=chunk_text,
             corpus="coca",
             corpus_id=chunk_cat,
         )
-        corpus.add_chunk(ngram_dicts)
+        create.add_chunk(path=corpus_path, ngrams=ngram_dicts)
 
 
 def make_processed_corpus(
-    corpus: corpus.Corpus,
+    corpus_name: str = "test",
     corpus_dir: str | Path = "test",
     chunk_size: int = 1000000,
     threshold: int = 2,
-) -> corpus.Corpus:
+    env_config: dict = create.DEFAULT_CONFIG,
+) -> None:
     """Construct and allocate the data of a corpus object.
 
     Given a corpus object that was created with the make=True argument,
@@ -164,7 +164,7 @@ def make_processed_corpus(
     No corpus_dir is needed for the test corpus.
 
     Args:
-        corpus (corpus.Corpus): A Corpus object initialized with make=True
+        corpus (str): The name of the corpus to process.
         corpus_dir (str | Path | None, optional): The directory of the corpus files.
         See the description for more details. Defaults to "test".
         chunk_size (int, optional): Size of the text chunk to be processed.
@@ -176,22 +176,28 @@ def make_processed_corpus(
         corpus.Corpus: An allocated Corpus object.
 
     """
-    corpus_name = corpus.corpus_name
+    db_path = Path(f"chunky/db/{corpus_name}.db")
+    create.init_corpus(db_path)
+    if not create.validate_corpus_name(corpus_name):
+        msg = "Not a valid corpus name."
+        raise ValueError(msg)
     if corpus_name == "test":
-        _process_test(corpus)
+        ngrams = _process_test()
+        create.add_chunk(db_path, ngrams)
     elif corpus_dir is None:
         exception_msg = "Corpus file not provided"
         raise RuntimeError(exception_msg)
     # ? Turn into registry of functions?
+
     elif corpus_name == "bnc":
         corpus_dir = Path(corpus_dir)
-        _process_bnc(corpus=corpus, corpus_dir=corpus_dir, chunk_size=chunk_size)
+        _process_bnc(corpus_path=db_path, corpus_dir=corpus_dir, chunk_size=chunk_size)
     elif corpus_name in {"coca", "coca_sample", "coca_fourgrams"}:
         corpus_dir = Path(corpus_dir)
         corpus_ids, coca_text_cats = _prepare_coca(corpus_dir)
         for cat_name, cat_chunk in coca_text_cats:
             _process_coca(
-                corpus=corpus,
+                corpus_path=db_path,
                 cat_name=cat_name,
                 cat_chunk=cat_chunk,
                 corpus_ids=corpus_ids,
@@ -200,7 +206,10 @@ def make_processed_corpus(
         exception_msg = "Corpus not supported."
         raise NotImplementedError(exception_msg)
     logger.info("Done adding to DB. Consolidating...")
-    corpus.consolidate_corpus(threshold=threshold)
-    corpus.create_totals()
+    create.consolidate_corpus(
+        path=db_path,
+        corpus_name=corpus_name,
+        threshold=threshold,
+        env_config=env_config,
+    )
     logger.info("Done creating totals. Corpus allocated and ready for use.")
-    return corpus

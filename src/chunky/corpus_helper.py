@@ -57,13 +57,7 @@ class Fetcher:
 
     """
 
-    def __init__(
-        self,
-        corpus: Corpus | str,
-        *,
-        make: bool = False,
-        **kwargs,  # noqa: ANN003
-    ) -> None:
+    def __init__(self, corpus: Corpus | str) -> None:
         """Initialize the Corpus Helper class.
 
         Initializes an instance of the Corpus Helper Class.
@@ -75,7 +69,6 @@ class Fetcher:
             If argument is a string with a corpus name, Helper makes the corpus before.
             make (bool, optional): Whether to make the corpus before linking with it.
             Defaults to False.
-            **kwargs: Arguments for the creation of the corpus if make=True.
             These are:
             corpus_dir (str): A string pointing to the corpus files.
             For BNC, the provided directory of the corpus_dir must be bnc_tokenized.txt.
@@ -90,7 +83,7 @@ class Fetcher:
         """
         logger.debug("Initializing helper for corpus %s", corpus)
         if isinstance(corpus, str):
-            self.corpus = Corpus(str(corpus), make=make, **kwargs)
+            self.corpus = Corpus(str(corpus))
         else:
             self.corpus = corpus
 

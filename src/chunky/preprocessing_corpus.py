@@ -88,9 +88,9 @@ def _clean_coca(raw_line: str, corpus_ids: str | None) -> list[tuple]:
     tokenization of contractions, numbering, and spacing.
 
     Args:
-        raw_lines (str): Lines from the CoCA corpus to be cleaned.
+        raw_line (str): Lines from the CoCA corpus to be cleaned.
         corpus_ids (str | None): IDs of the sub-corpus (e.g., acad) to which
-        the raw_lines belong.
+        the raw_line belong.
 
     Returns:
         list[tuple]: A list of tuples of corpus id, list of clean lines.
@@ -209,7 +209,7 @@ def _line_to_ngram(text: str, n: int = 2) -> zip:
     return _ngram_tuple(words, n)
 
 
-def _preprocess_test() -> tuple:
+def _preprocess_test() -> dict:
     """Extract unigrams and ngrams from the test corpus.
 
     Complete process of generation for the test corpus. Obtains
@@ -238,7 +238,7 @@ def _preprocess_test() -> tuple:
         for corpus, corpus_dict in zip(corpora, unigrams, strict=True)
         for unigram, freq in corpus_dict.items()
     ]
-    return unigrams, fourgrams
+    return {"unigrams": unigrams, "fourgrams": fourgrams}
 
 
 def _extract_ngrams(clean_lines: list) -> tuple:
@@ -292,7 +292,7 @@ def preprocess_corpus(
     corpus: str,
     raw_lines: str | list[str] | None = None,
     corpus_id: str | None = None,
-) -> tuple:
+) -> dict:
     """Clean corpus and extract ngram frequencies from it.
 
     Args:
@@ -318,4 +318,4 @@ def preprocess_corpus(
         raise NotImplementedError(error_message)
     this_lines = clean_function(raw_lines, corpus_id)
     unigrams, fourgrams = _extract_ngrams(this_lines)
-    return unigrams, fourgrams
+    return {"unigrams": unigrams, "fourgrams": fourgrams}

@@ -1,13 +1,11 @@
 """Module for the Corpus class."""
 
 # TODO(omfgzell): Exception logic #06
-# TODO(omfgzell): Type hint for kwargs #08
 # TODO(omfgzell): Test individual measure methods #11
 
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
@@ -16,16 +14,11 @@ from typing import Any
 import duckdb
 import pandas as pd
 import sqlalchemy as sa
-from psycopg import sql
 from sqlalchemy import orm
 from sqlalchemy.sql import select
 from tqdm import tqdm
 
-from chunky.processing_corpus import make_processed_corpus
-
 logger = logging.getLogger(__name__)
-TEMP_PATH = Path("chunky/db/temp/")
-
 Base = orm.declarative_base()
 
 
@@ -162,17 +155,12 @@ class Corpus:
         in the /db directory.
         _ngram_db (Path): Path to the parquet file containing ngram counts. Determined
         as {corpus_name}_ngrams.parquet in the /db directory.
-        _temp (Path): Directory to store temporary files used in the processing and
-        querying of the database.
 
     """
 
     def __init__(
         self,
         corpus_name: str,
-        *,
-        make: bool = False,
-        **kwargs,  # noqa: ANN003
     ) -> None:
         """Initialize an instance of a Corpus.
 
@@ -203,31 +191,11 @@ class Corpus:
             f"duckdb:///{self._path}",
             echo=False,
         )
-        self._temp = TEMP_PATH
-        if not self._temp.exists():
-            self._temp.mkdir(parents=True)
-
         self._ngram_db = Path(f"chunky/db/{self.corpus_name}_ngrams.parquet")
-        if not self._path.is_file() and not make:
-            error_message = "No corpus found. Make first or run with make = True"
+        if not self._path.is_file():
+            error_message = "No corpus found. Make first with make_processed_corpus()."
             raise RuntimeError(error_message)
-        if make:
-            logger.info("Making corpus %s", corpus_name)
-            corpus_make_dir = kwargs.get("corpus_dir")
-            if corpus_make_dir is None and corpus_name != "test":
-                exception_msg = """To make a corpus, provide the corresponding \
-corpus_dir at initialization."""
-                raise RuntimeError(exception_msg)
-
-            self._init_corpus()
-            make_processed_corpus(self, **kwargs)
-
-        elif self._path.is_file():
-            logger.info("Using preexisting corpus")
-
-        else:
-            error_message = "Something happened!!"
-            raise RuntimeError
+        logger.info("Using preexisting corpus")
 
     def __call__(self, query: str) -> list:
         """Query the underlying database.
@@ -243,32 +211,6 @@ corpus_dir at initialization."""
             query_result = conn.execute(query)
             return query_result.fetchall()
 
-    def _init_corpus(self) -> None:
-        """Initialize the corpus for first-time use."""
-        with duckdb.connect(self._path) as conn:
-            conn.execute("""
-                CREATE TABLE ngram_db_temp
-                (
-                    corpus TEXT,
-                    ug_1 UINT64,
-                    ug_2 UINT64,
-                    ug_3 UINT64,
-                    ug_4 UINT64,
-                    big_1 UINT64,
-                    trig_1 UINT64,
-                    freq INTEGER
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE unigram_db_temp
-                (
-                    corpus TEXT,
-                    ug TEXT,
-                    ug_hash UINT64,
-                    freq INTEGER
-                )
-            """)
-
     def query_parquet(self, ug: int | None = None) -> list:
         """Dev class. Eliminate."""
         with duckdb.connect(self._path) as conn:
@@ -282,7 +224,7 @@ corpus_dir at initialization."""
                 )
             return this_query.fetchall()
 
-    def show_ngrams(self, limit: int = 100) -> pd.DataFrame:
+    def _show_ngrams(self, limit: int = 100) -> pd.DataFrame:
         """Show a sample of the ngram frequency table.
 
         Queries the ngram parquet file and shows a sample of rows from it.
@@ -295,7 +237,7 @@ corpus_dir at initialization."""
             frequency table.
 
         """
-        ngram_db_query = f"SELECT * FROM {self._ngram_db} LIMIT {limit}"
+        ngram_db_query = f"SELECT * FROM {self._ngram_db} LIMIT {limit}"  # noqa: S608
         return pd.read_sql(ngram_db_query, self._engine)
 
     def df(self, query: str, params: list | dict | None = None) -> pd.DataFrame:
@@ -321,353 +263,6 @@ corpus_dir at initialization."""
                 logger.debug(params)
                 this_query = conn.execute(query, params)
             return this_query.df()
-
-    def add_chunk(self, ngram_lists: tuple) -> None:
-        """Add ngram to the corpus.
-
-        For use during allocation of ngram table. Takes unigram and
-        ngram counts and adds them to the SQL database and the parquet files.
-        Meant to be accessed by the processing_corpus methods.
-
-        Args:
-            ngram_lists (tuple): Tuple of unigram, fourgram frequency counts.
-
-        """
-        with duckdb.connect(self._path) as conn:
-            chunk_unigrams, chunk_ngrams = ngram_lists
-            chunk_unigrams = pd.DataFrame(
-                chunk_unigrams,
-                columns=[
-                    "corpus",
-                    "ug",
-                    "freq",
-                ],
-            )
-            chunk_unigrams["corpus"] = chunk_unigrams["corpus"].astype(str)
-            chunk_ngrams = pd.DataFrame(
-                chunk_ngrams,
-                columns=[
-                    "corpus",
-                    "ug_1",
-                    "ug_2",
-                    "ug_3",
-                    "ug_4",
-                    "freq",
-                ],
-            )
-            chunk_ngrams["corpus"] = chunk_ngrams["corpus"].astype(str)
-            chunk_ngrams["big_1"] = chunk_ngrams["ug_1"] + " " + chunk_ngrams["ug_2"]
-            chunk_ngrams["trig_1"] = chunk_ngrams["big_1"] + " " + chunk_ngrams["ug_3"]
-            conn.register("unigram_df", chunk_unigrams)
-            conn.register("ngram_df", chunk_ngrams)
-
-            conn.execute("""
-                CREATE OR REPLACE TEMPORARY TABLE chunk_unigrams AS
-                (
-                    SELECT
-                        corpus,
-                        ug,
-                        HASH(ug) as ug_hash,
-                        freq
-                    FROM
-                        unigram_df
-                )
-            """)
-            conn.execute("""
-                CREATE OR REPLACE TEMPORARY TABLE chunk_ngrams AS
-                (
-                    SELECT
-                        corpus,
-                        HASH(ug_1) AS ug_1,
-                        HASH(ug_2) AS ug_2,
-                        HASH(ug_3) AS ug_3,
-                        HASH(ug_4) AS ug_4,
-                        HASH(big_1) AS big_1,
-                        HASH(trig_1) AS trig_1,
-                        freq
-                    FROM
-                        ngram_df
-                )
-            """)
-            conn.execute("""
-                INSERT INTO
-                    ngram_db_temp
-                SELECT
-                    *
-                FROM
-                    chunk_ngrams
-            """)
-            conn.execute("""
-                INSERT INTO
-                    unigram_db_temp
-                SELECT
-                    *
-                FROM
-                    chunk_unigrams
-            """)
-
-    def consolidate_corpus(self, threshold: int = 2) -> None:
-        """Consolidate the temporary tables into the total ones.
-
-        Ngram and unigram counts are added to the tables vertically.
-        This method consolidates that table by summing frequency counts
-        within each sub-corpus and tranposing the table to a horizontal format
-        with one column per sub-corpus and a total frequency column.
-
-        Args:
-            threshold (int, optional): Minimum total token frequency
-            for an ngram to be retained in the corpus. Defaults to 2.
-
-        """
-        # TODO(omfgzell): very long function #09
-        with duckdb.connect(self._path) as conn:
-            cpu_count = os.cpu_count()
-            if cpu_count:
-                conn.execute(f"SET threads TO {cpu_count - 1}")
-            else:
-                conn.execute("SET threads TO 1")
-            conn.execute("SET memory_limit='20GB'")
-            all_corpora_names = conn.execute(
-                """
-                SELECT DISTINCT
-                    corpus
-                FROM
-                    ngram_db_temp
-                    """,
-            ).fetchall()
-            all_corpora_names = [
-                str(corpus_list[0]) for corpus_list in all_corpora_names
-            ]
-            all_corpora_names.sort()
-
-            temp_fname = sql.Identifier(f"{self._temp}/ngram_db_raw.parquet")
-            all_corpora = sql.SQL(", ").join(
-                sql.Identifier(corpus) for corpus in all_corpora_names
-            )
-            create_temp_query = """
-            COPY (
-                SELECT
-                    *
-                FROM
-                    ngram_db_temp
-                PIVOT(SUM(freq) FOR corpus IN ({}))
-            ) TO {} (FORMAT PARQUET)
-            """
-            create_temp_query = (
-                sql.SQL(create_temp_query).format(all_corpora, temp_fname).as_string()
-            )
-            conn.execute(create_temp_query)
-
-            conn.execute("DROP TABLE ngram_db_temp")
-            conn.execute("VACUUM ANALYZE")
-            pivot_query = """
-            CREATE OR REPLACE TABLE unigram_db AS (
-                SELECT
-                    *
-                FROM
-                    unigram_db_temp
-                PIVOT(SUM(freq) FOR corpus IN ({}))
-            )
-            """
-            pivot_query = sql.SQL(pivot_query).format(all_corpora).as_string()
-            conn.execute(pivot_query)
-            conn.execute("DROP TABLE unigram_db_temp")
-            conn.execute("VACUUM ANALYZE")
-            # Replace NA with 0
-            coalesce_query = """
-                COPY (
-                    SELECT
-                        ug_1,
-                        ug_2,
-                        ug_3,
-                        ug_4,
-                        big_1,
-                        trig_1,
-                        COALESCE(
-                            COLUMNS(* EXCLUDE(ug_1, ug_2, ug_3, ug_4, big_1, trig_1)),
-                            0
-                        )
-                    FROM
-                        {}
-                ) TO {} (FORMAT PARQUET)
-                """
-            coalesce_query = (
-                sql.SQL(coalesce_query)
-                .format(
-                    f"{self._temp}/ngram_db_raw.parquet",
-                    f"{self._temp}/ngram_db_coalesced.parquet",
-                )
-                .as_string()
-            )
-            conn.execute(coalesce_query)
-            Path(f"{self._temp}/ngram_db_raw.parquet").unlink()
-            freq_query = """
-                COPY (
-                    SELECT
-                        *,
-                        LIST_SUM(
-                            LIST_VALUE(
-                                * COLUMNS(
-                                    * EXCLUDE (ug_1, ug_2, ug_3, ug_4, big_1, trig_1)
-                                    )
-                                )
-                            ) AS freq
-                    FROM
-                        {}
-                ) TO {} (FORMAT PARQUET)
-                """
-            freq_query = (
-                sql.SQL(freq_query)
-                .format(
-                    f"{self._temp}/ngram_db_coalesced.parquet",
-                    f"{self._temp}/ngram_db_freq.parquet",
-                )
-                .as_string()
-            )
-            conn.execute(freq_query)
-            Path(f"{self._temp}/ngram_db_coalesced.parquet").unlink()
-
-            corpus_sum_query = [
-                sql.SQL("SUM({corpus}) AS {corpus}").format(
-                    corpus=sql.Identifier(corpus_name),
-                )
-                for corpus_name in all_corpora_names
-            ]
-            corpus_sum_query = sql.SQL(",\n").join(corpus_sum_query)
-            sum_query = """
-            COPY (
-                SELECT
-                    ug_1,
-                    ug_2,
-                    ug_3,
-                    ug_4,
-                    big_1,
-                    trig_1,
-                    {},
-                    SUM(freq) as freq
-                FROM
-                    {}
-                GROUP BY
-                    ug_1,
-                    ug_2,
-                    ug_3,
-                    ug_4,
-                    big_1,
-                    trig_1
-            ) TO {} (FORMAT PARQUET)
-                """
-            sum_query = (
-                sql.SQL(sum_query)
-                .format(
-                    corpus_sum_query,
-                    f"{self._temp}/ngram_db_freq.parquet",
-                    f"{self._temp}/ngram_db_summed.parquet",
-                )
-                .as_string()
-            )
-            conn.execute(sum_query)
-
-            Path(f"{self._temp}/ngram_db_freq.parquet").unlink()
-
-            conn.execute("""
-                CREATE OR REPLACE TABLE unigram_db AS (
-                    SELECT
-                        ug,
-                        ug_hash,
-                        COALESCE(COLUMNS(* EXCLUDE(ug, ug_hash)), 0)
-                FROM
-                    unigram_db
-                )
-            """)
-            conn.execute("""
-                CREATE OR REPLACE TABLE unigram_db AS (
-                    SELECT
-                        *,
-                        LIST_SUM(LIST_VALUE(*COLUMNS(* EXCLUDE (ug, ug_hash)))) AS freq
-                    FROM unigram_db
-                )
-            """)
-            conn.execute(
-                """
-                CREATE OR REPLACE TABLE unigram_db AS (
-                    SELECT
-                        *
-                    FROM
-                        unigram_db
-                    WHERE
-                        freq > ?
-                )
-                """,
-                [threshold],
-            )
-            conn.execute(
-                """
-                CREATE OR REPLACE TEMPORARY TABLE unigram_drop AS (
-                    SELECT
-                        *
-                    FROM
-                        unigram_db
-                    WHERE
-                        freq <= ?
-                )""",
-                [threshold],
-            )
-            # Filter on threshold and clean dummy trigrams
-            conn.execute("SET preserve_insertion_order=false")
-            ngram_db_query = """
-                COPY (
-                    SELECT
-                        *
-                    FROM
-                        {}
-                    WHERE
-                        ug_1 != HASH('END')
-                        AND ug_2 != HASH('END')
-                    ORDER BY
-                        ug_1,
-                        ug_2,
-                        ug_3,
-                        ug_4
-                ) TO {} (
-                    FORMAT PARQUET,
-                    CODEC 'zstd',
-                    COMPRESSION_LEVEL 10,
-                    ROW_GROUP_SIZE 200000,
-                    DICTIONARY_SIZE_LIMIT 100000,
-                    BLOOM_FILTER_FALSE_POSITIVE_RATIO 0.01
-                )
-                """
-            ngram_db_query = (
-                sql.SQL(ngram_db_query)
-                .format(
-                    sql.Identifier(f"{self._temp}/ngram_db_summed.parquet"),
-                    sql.Identifier(
-                        f"chunky/db/{self.corpus_name}_ngrams.parquet",
-                    ),
-                )
-                .as_string()
-            )
-            conn.execute(ngram_db_query)
-            Path(f"{self._temp}/ngram_db_summed.parquet").unlink()
-            conn.execute("VACUUM ANALYZE")
-
-    def create_totals(self) -> None:
-        """Create a table with the proportions of each corpus from total counts."""
-        with duckdb.connect(self._path) as conn:
-            conn.execute(
-                """
-                CREATE OR REPLACE TABLE corpus_proportions AS (
-                    SELECT
-                        row_number() OVER () AS id,
-                        SUM(COLUMNS(* EXCLUDE(ug, ug_hash, freq))) / SUM(freq)
-                    FROM
-                    unigram_db
-                )
-            """,
-            )
-            conn.execute("ALTER TABLE corpus_proportions ADD PRIMARY KEY (id)")
-
-    # Below: methods related to MWU extraction directly.
 
     def _create_query(self, ngram_query: NgramQuery) -> None:
         """Allocate a list of ngrams as a query for filtering DB.
