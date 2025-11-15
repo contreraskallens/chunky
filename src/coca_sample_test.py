@@ -9,16 +9,8 @@ from chunky.corpus_helper import Fetcher
 
 
 helper = Fetcher(
-    "coca_sample",
-    make=False,
-    # make=True,
-    # corpus_dir="chunky/corpora/coca_sample/",
-    # threshold=1,
-    # chunk_size=5,
+    "coca",
 )
-
-# helper = Fetcher("coca_sample")
-
 
 sentence = (
     "Hello! Come in and eat boiled potatoes they are some of the most but it was never"
@@ -31,11 +23,3 @@ print(
         mode="normalized",
     )
 )
-
-
-# print(x["normalized"])
-
-
-# pp(helper.corpus.query_parquet())
-
-# pp(helper.corpus.query_parquet(ug=4756275072626810161))

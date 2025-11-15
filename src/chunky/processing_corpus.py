@@ -1,7 +1,6 @@
 """Module with functions for building data structures for MWU extraction."""
 
 # TODO(omfgzell): Registry instead of if functions for custom corpus #03
-# TODO(omfgzell): Clean cat_name #04
 
 from __future__ import annotations
 

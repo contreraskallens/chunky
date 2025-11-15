@@ -6,10 +6,9 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import reduce
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import duckdb
 import pandas as pd
@@ -18,8 +17,40 @@ from sqlalchemy import orm
 from sqlalchemy.sql import select
 from tqdm import tqdm
 
+from .create_corpus import (
+    ALLOWED_CORPORA,
+    CORPUS_DIR,
+    is_valid_identifier,
+    quote_identifier,
+    validate_corpus_name,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+VALID_COLUMNS = ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
+_UNSET: Any = object()  # Sentinel for NgramQuery
+
 logger = logging.getLogger(__name__)
 Base = orm.declarative_base()
+
+
+def _validate_query(ngram_query: NgramQuery) -> bool:
+    return (
+        is_valid_identifier(ngram_query.source)
+        and is_valid_identifier(ngram_query.target)
+        and (ngram_query.source in VALID_COLUMNS)
+        and (ngram_query.target) in VALID_COLUMNS
+    )
+
+
+def _validate_corpus(corpus: Corpus) -> bool:
+    corpus_file = corpus.get_path()
+    ngram_file = corpus.get_ngram_file()
+    corpus_check = corpus_file.is_relative_to(CORPUS_DIR.resolve())
+    ngram_check = ngram_file.is_relative_to(CORPUS_DIR.resolve())
+
+    return corpus_check and ngram_check
 
 
 class ReducedQuery(Base):
@@ -103,11 +134,11 @@ class NgramQuery:
 
     """
 
-    query: type[orm.DeclarativeBase]
-    freq_table: type[orm.DeclarativeBase]
-    total_proportions: type[orm.DeclarativeBase]
+    query: sa.Select = field(init=False, default=_UNSET)
+    freq_table: type[orm.DeclarativeBase] = field(init=False, default=_UNSET)
+    total_proportions: type[orm.DeclarativeBase] = field(init=False, default=_UNSET)
     results: Any  # Messy with the CTE stuff. Leave it as Any.
-    query_ref: type[orm.DeclarativeBase]
+    query_ref: type[orm.DeclarativeBase] = field(init=False, default=_UNSET)
     ngrams: list
     source: str
     target: str
@@ -129,6 +160,12 @@ class NgramQuery:
         self.results = new_results
         if isinstance(self.results, sa.HasCTE):
             self.results = self.results.cte()
+
+    def _validate_columns(self, name: str) -> str:
+        if is_valid_identifier(name) and name in VALID_COLUMNS:
+            return quote_identifier(name)
+        msg = "Not a valid column name"
+        raise ValueError(msg)
 
 
 def get_column(
@@ -158,6 +195,11 @@ class Corpus:
 
     """
 
+    corpus_name: str
+    _path: Path
+    _ngram_db: Path
+    _engine: sa.Engine
+
     def __init__(
         self,
         corpus_name: str,
@@ -165,8 +207,7 @@ class Corpus:
         """Initialize an instance of a Corpus.
 
             Sets the paths to the database, parquet file, and temp directory.
-            Optionally can initialize a corpus that hasn't been allocated yet
-            if make = True.
+            Do a bunch of checks to avoid SQL injection.
 
         Args:
             corpus_name (str): A string with the name of the corpus.
@@ -185,17 +226,27 @@ class Corpus:
             stored in the corpus file. Defaults to 2.
 
         """
+        if corpus_name not in ALLOWED_CORPORA or not validate_corpus_name(corpus_name):
+            msg = f"{corpus_name} is not an allowed corpus."
+            raise ValueError(msg)
         self.corpus_name = corpus_name
-        self._path = Path(f"chunky/db/{corpus_name}.db")
+
+        corpus_file = CORPUS_DIR / f"{corpus_name}.db"
+        corpus_file = corpus_file.resolve()
+        ngram_file = CORPUS_DIR / f"{corpus_name}_ngrams.parquet"
+        ngram_file = ngram_file.resolve()
+
+        if not corpus_file.is_file() or not ngram_file.is_file():
+            error_message = "No corpus found. Make first with make_processed_corpus()."
+            raise RuntimeError(error_message)
+
+        self._path = corpus_file
+        self._ngram_db = ngram_file
+
         self._engine = sa.create_engine(
             f"duckdb:///{self._path}",
             echo=False,
         )
-        self._ngram_db = Path(f"chunky/db/{self.corpus_name}_ngrams.parquet")
-        if not self._path.is_file():
-            error_message = "No corpus found. Make first with make_processed_corpus()."
-            raise RuntimeError(error_message)
-        logger.info("Using preexisting corpus")
 
     def __call__(self, query: str) -> list:
         """Query the underlying database.
@@ -211,16 +262,33 @@ class Corpus:
             query_result = conn.execute(query)
             return query_result.fetchall()
 
+    def get_path(self) -> Path:
+        return self._path
+
+    def get_ngram_file(self) -> Path:
+        return self._ngram_db
+
     def query_parquet(self, ug: int | None = None) -> list:
         """Dev class. Eliminate."""
         with duckdb.connect(self._path) as conn:
+            if not _validate_corpus(self):
+                msg = "Problem in corpus object. Please initialize again correctly."
+                raise ValueError(msg)
             if ug is None:
                 this_query = conn.execute(
-                    f"EXPLAIN ANALYZE SELECT * FROM '{self._ngram_db}'"
+                    f"""EXPLAIN ANALYZE
+                        SELECT *
+                        FROM '{self._ngram_db}'
+                        """,  # noqa: S608 Validated during initialization
                 )
             else:
                 this_query = conn.execute(
-                    f"EXPLAIN ANALYZE SELECT * FROM '{self._ngram_db}' WHERE ug_1 = {ug}"
+                    f"""
+                    EXPLAIN ANALYZE
+                    SELECT *
+                    FROM '{self._ngram_db}'
+                    WHERE ug_1 = {ug}
+                    """,  # noqa: S608 Validated during initialization
                 )
             return this_query.fetchall()
 
@@ -237,6 +305,9 @@ class Corpus:
             frequency table.
 
         """
+        if not _validate_corpus(self):
+            msg = "Problem with corpus information. Please initialize again"
+            raise ValueError(msg)
         ngram_db_query = f"SELECT * FROM '{self._ngram_db}' LIMIT {limit}"  # noqa: S608
         return pd.read_sql(ngram_db_query, self._engine)
 
@@ -295,18 +366,23 @@ class Corpus:
                 )
                 """
             conn.execute(sa.text(query_ref_create))
-            query_ref_insert = f"""
-                INSERT INTO
-                    query_ref
-                SELECT
-                    row_number() OVER () AS id,
-                    {ngram_query.source} AS comp_1,
-                    {ngram_query.target} AS comp_2,
-                    HASH({ngram_query.source}) AS comp_1_hash,
-                    HASH({ngram_query.target}) AS comp_2_hash
-                FROM
-                    query_df
-            """
+
+            if _validate_query(ngram_query):
+                query_ref_insert = f"""
+                    INSERT INTO
+                        query_ref
+                    SELECT
+                        row_number() OVER () AS id,
+                        {quote_identifier(ngram_query.source)} AS comp_1,
+                        {quote_identifier(ngram_query.target)} AS comp_2,
+                        HASH({quote_identifier(ngram_query.source)}) AS comp_1_hash,
+                        HASH({quote_identifier(ngram_query.target)}) AS comp_2_hash
+                    FROM
+                        query_df
+                """  # noqa: S608 Identifiers validated before
+            else:
+                msg = "Not valid column"
+                raise ValueError(msg)
             conn.execute(sa.text(query_ref_insert))
             conn.commit()
 
@@ -320,7 +396,12 @@ class Corpus:
             and source/target information.
 
         """
-
+        if not _validate_query(ngram_query):
+            msg = "Not valid column names in query. Initialize again."
+            raise ValueError(msg)
+        if not _validate_corpus(self):
+            msg = "Problem with corpus information. Please initialize again"
+            raise ValueError(msg)
         token_freq_query = f"""
         CREATE OR REPLACE TABLE token_freq AS
         SELECT
@@ -330,11 +411,11 @@ class Corpus:
         FROM
             query_ref
         INNER JOIN READ_PARQUET('{self._ngram_db}')
-            ON query_ref.comp_1_hash = {ngram_query.source}
-            AND query_ref.comp_2_hash = {ngram_query.target}
+            ON query_ref.comp_1_hash = {quote_identifier(ngram_query.source)}
+            AND query_ref.comp_2_hash = {quote_identifier(ngram_query.target)}
         GROUP BY
             query_ref.comp_1_hash, query_ref.comp_2_hash
-                """
+                """  # noqa: S608 Validated before
         with self._engine.connect() as conn:
             conn.execute(sa.text(token_freq_query))
             conn.commit()
@@ -363,12 +444,17 @@ class Corpus:
                 & (token_freq.comp_2 == query.comp_2_hash),
             ),
         )
-
+        if not _validate_query(ngram_query):
+            msg = "Not valid column names in query. Initialize again."
+            raise ValueError(msg)
+        if not _validate_corpus(self):
+            msg = "Problem with corpus information. Please initialize again"
+            raise ValueError(msg)
         filter_query = f"""
                 CREATE OR REPLACE TABLE filtered_db AS
                 SELECT
-                    {ngram_query.source} AS comp_1,
-                    {ngram_query.target} AS comp_2,
+                    {quote_identifier(ngram_query.source)} AS comp_1,
+                    {quote_identifier(ngram_query.target)} AS comp_2,
                     SUM(
                         COLUMNS(* EXCLUDE(ug_1, ug_2, ug_3, ug_4, big_1, trig_1))
                     )
@@ -390,15 +476,15 @@ class Corpus:
                 GROUP BY
                     comp_1,
                     comp_2
-                """
+                """  # noqa: S608 Validated before
         with self._engine.connect() as conn:
             conn.execute(
-                sa.text(f"CREATE OR REPLACE TABLE reduced_query AS {reduced_query}")
+                sa.text(f"CREATE OR REPLACE TABLE reduced_query AS {reduced_query}"),
             )
             conn.execute(sa.text(filter_query))
             conn.commit()
             parquet_columns = conn.execute(
-                sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')")
+                sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')"),  # noqa: S608 Validated before
             ).fetchall()
         corpus_columns = [
             column[0]

@@ -8,7 +8,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-allowed_corpora = ["coca", "coca_sample", "bnc", "test"]
+ALLOWED_CORPORA = ["coca", "coca_sample", "bnc", "test"]
 TEMP_DIR = Path("chunky/db/temp")
 CORPUS_DIR = Path("chunky/db")
 DEFAULT_CONFIG = {"memory_limit": 20, "cpu_cores": None}
@@ -26,15 +26,15 @@ def validate_corpus_name(name: str) -> bool:
 
 def register_corpus(name: str) -> None:
     if validate_corpus_name(name):
-        allowed_corpora.append(name)
+        ALLOWED_CORPORA.append(name)
 
 
-def _quote_identifier(name: str) -> str:
+def quote_identifier(name: str) -> str:
     """Safely quote DuckDB identifier."""
     return f'"{name.replace('"', '""')}"'
 
 
-def _is_valid_identifier(name: str) -> bool:
+def is_valid_identifier(name: str) -> bool:
     """Validate identifier is safe alphanumeric format."""
     # Allow letters, numbers, underscores - must start with letter
     return bool(re.match(r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$", name))
@@ -188,10 +188,10 @@ def _get_valid_corpora(conn: duckdb.DuckDBPyConnection) -> list[str]:
     # Validate corpora names to avoid SQL injection
     valid_corpora = []
     for corpus in all_corpora:
-        if not _is_valid_identifier(corpus):
+        if not is_valid_identifier(corpus):
             msg = f"{corpus} is not a valid corpus name"
             raise ValueError(msg)
-        valid_corpora.append(_quote_identifier(corpus))
+        valid_corpora.append(quote_identifier(corpus))
     return valid_corpora
 
 
@@ -371,16 +371,15 @@ def _finalize_corpus(
     # Now ngrams
     temp_read = TEMP_DIR / "ngram_db_summed.parquet"
     temp_read = temp_read.resolve()
-    if corpus_name not in allowed_corpora or not validate_corpus_name(corpus_name):
+    if corpus_name not in ALLOWED_CORPORA or not validate_corpus_name(corpus_name):
         msg = f"{corpus_name} is not an allowed corpus."
         raise ValueError(msg)
 
-    corpus_dir = Path("chunky/db")
-    ngram_file = corpus_dir / f"{corpus_name}_ngrams.parquet"
+    ngram_file = CORPUS_DIR / f"{corpus_name}_ngrams.parquet"
     ngram_file = ngram_file.resolve()
 
     # Check for relative to avoid directory traversal
-    if not ngram_file.is_relative_to(corpus_dir.resolve()):
+    if not ngram_file.is_relative_to(CORPUS_DIR.resolve()):
         msg = "Corpus path resolved outside corpus directory."
         raise ValueError(msg)
 
