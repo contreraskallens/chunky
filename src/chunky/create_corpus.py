@@ -124,9 +124,8 @@ def add_chunk(path: Path, ngrams: dict) -> None:
         ngram_lists (tuple): Tuple of unigram, fourgram frequency counts.
 
     """
+    chunk_unigrams, chunk_ngrams = _get_chunk_dfs(ngrams)
     with duckdb.connect(path) as conn:
-        chunk_unigrams, chunk_ngrams = _get_chunk_dfs(ngrams)
-
         conn.register("unigram_df", chunk_unigrams)
         conn.register("ngram_df", chunk_ngrams)
         conn.execute("""
@@ -230,6 +229,7 @@ def _coalesce_corpus(conn: duckdb.DuckDBPyConnection) -> None:
     temp_read = temp_read.resolve()
     temp_write = TEMP_DIR / "ngram_db_coalesced.parquet"
     temp_write = temp_write.resolve()
+
     coalesce_ngrams = f"""
     COPY (
         SELECT
@@ -298,6 +298,7 @@ def _make_freqs(conn: duckdb.DuckDBPyConnection) -> None:
         """
     conn.execute(ngram_freq)
     conn.execute(unigram_freq)
+
     temp_read.unlink()
 
 

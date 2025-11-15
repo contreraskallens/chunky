@@ -141,7 +141,7 @@ class Fetcher:
             pd.DataFrame: Dataframe containing the ngram table from the corpus.
 
         """
-        return self.corpus.show_ngrams(limit=limit)
+        return self.corpus._show_ngrams(limit=limit)
 
     def _split_ngrams(self, all_ngrams: list[str]) -> tuple:
         """Split and sort ngrams according to length.
@@ -212,6 +212,7 @@ class Fetcher:
         trigram_query = NgramQuery(trigrams, "big_1", "ug_3", 3)
         fourgram_query = NgramQuery(fourgrams, "trig_1", "ug_4", 4)
         self._bigram_scores = self.corpus.get_scores(bigram_query)
+        print(self._bigram_scores)
         self._trigram_scores = self.corpus.get_scores(trigram_query)
         self._fourgram_scores = self.corpus.get_scores(fourgram_query)
 

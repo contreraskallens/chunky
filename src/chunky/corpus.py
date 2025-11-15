@@ -237,7 +237,7 @@ class Corpus:
             frequency table.
 
         """
-        ngram_db_query = f"SELECT * FROM {self._ngram_db} LIMIT {limit}"  # noqa: S608
+        ngram_db_query = f"SELECT * FROM '{self._ngram_db}' LIMIT {limit}"  # noqa: S608
         return pd.read_sql(ngram_db_query, self._engine)
 
     def df(self, query: str, params: list | dict | None = None) -> pd.DataFrame:
@@ -392,6 +392,9 @@ class Corpus:
                     comp_2
                 """
         with self._engine.connect() as conn:
+            conn.execute(
+                sa.text(f"CREATE OR REPLACE TABLE reduced_query AS {reduced_query}")
+            )
             conn.execute(sa.text(filter_query))
             conn.commit()
             parquet_columns = conn.execute(
