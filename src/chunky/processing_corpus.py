@@ -1,6 +1,6 @@
 """Module with functions for building data structures for MWU extraction."""
 
-# TODO(omfgzell): Registry instead of if functions for custom corpus #03
+# TODO: Registry instead of if functions for custom corpus #03
 
 from __future__ import annotations
 
@@ -183,10 +183,8 @@ def make_processed_corpus(
     if corpus_name == "test":
         ngrams = _process_test()
         create.add_chunk(db_path, ngrams)
-    elif corpus_dir is None:
-        exception_msg = "Corpus file not provided"
-        raise RuntimeError(exception_msg)
-    # ? Turn into registry of functions?
+
+        # ? Turn into registry of functions?
 
     elif corpus_name == "bnc":
         corpus_dir = Path(corpus_dir)

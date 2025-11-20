@@ -1,11 +1,11 @@
 """Module for the Fetcher class."""
 
-# TODO(omfgzell): Variable max length of ngram #08
-# TODO(omfgzell): Exception logic #10
-# TODO(omfgzell): make method for large batches and for specific measures. #12
-# TODO(omfgzell): Check that weights sum 1 #13
-# TODO(omfgzell): test for corpora other than CoCA. #14
-# TODO(omfgzell): Return dataclass instead of tuples and dictionaries #15
+# TODO: Variable max length of ngram #08
+# TODO: Exception logic #10
+# TODO: make method for large batches and for specific measures. #12
+# TODO: Check that weights sum 1 #13
+# TODO: test for corpora other than CoCA. #14
+# TODO: Return dataclass instead of tuples and dictionaries #15
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import logging
 import numpy as np
 import pandas as pd
 from nltk import everygrams
+from typing import cast
 
 from chunky.corpus import Corpus, NgramQuery
 
@@ -192,10 +193,7 @@ class Fetcher:
         fourgrams = [list(fourgram) for fourgram in set(fourgrams)]
         return bigrams, trigrams, fourgrams
 
-    def _make_scores_ngrams(
-        self,
-        ngrams: list[str],
-    ) -> None:
+    def _make_scores_ngrams(self, ngrams: list[str], *, verbose=False) -> None:
         """Allocate scores for all provided ngrams.
 
         Queries the corpus for the provided ngrams and obtains the
@@ -211,9 +209,9 @@ class Fetcher:
         bigram_query = NgramQuery(bigrams, "ug_1", "ug_2", 2)
         trigram_query = NgramQuery(trigrams, "big_1", "ug_3", 3)
         fourgram_query = NgramQuery(fourgrams, "trig_1", "ug_4", 4)
-        self._bigram_scores = self.corpus.get_scores(bigram_query)
-        self._trigram_scores = self.corpus.get_scores(trigram_query)
-        self._fourgram_scores = self.corpus.get_scores(fourgram_query)
+        self._bigram_scores = self.corpus.get_scores(bigram_query, verbose=verbose)
+        self._trigram_scores = self.corpus.get_scores(trigram_query, verbose=verbose)
+        self._fourgram_scores = self.corpus.get_scores(fourgram_query, verbose=verbose)
 
     def _process_text(
         self,
@@ -256,11 +254,11 @@ class Fetcher:
         )
         return [ngram for line in all_ngrams.to_list() for ngram in line]
 
-    def _make_scores_text(
+    def _get_ngrams_text(
         self,
         text: str,
         **kwargs: str,
-    ) -> None:
+    ) -> list[str]:
         """Allocate scores for a chunk of text.
 
         Makes and allocates as attributes of this Helper instance the
@@ -273,9 +271,10 @@ class Fetcher:
 
         """
         ngrams = self._process_text(text=text, **kwargs)
-        self._make_scores_ngrams(
-            ngrams=ngrams,
-        )
+        return ngrams
+        # self._make_scores_ngrams(
+        # ngrams=ngrams,
+        # )
 
     def _min_max(self, column: pd.Series) -> pd.Series:
         """Min-max normalize a column of a dataframe.
@@ -324,41 +323,51 @@ class Fetcher:
             entropy_limits = [-0.1, 0.1]
         normalized_results = results.copy()
         norm_no_data = normalized_results[results.isna().any(axis=1)]
-        norm_no_data = norm_no_data[["comp_1", "comp_2", "ngram_length"]]
-        norm_no_data = norm_no_data.replace(np.nan, pd.NA, inplace=False)
+        norm_no_data = norm_no_data.loc[:, ["comp_1", "comp_2", "ngram_length"]]
+        norm_no_data = norm_no_data.fillna(pd.NA)
         normalized_results = normalized_results[normalized_results.notna().all(axis=1)]
-        normalized_results[["token_freq", "typef_1", "typef_2"]] = normalized_results[
-            ["token_freq", "typef_1", "typef_2"]
-        ].apply(lambda x: np.log(x))
+        normalized_results.loc[:, ["token_freq", "typef_1", "typef_2"]] = (
+            normalized_results.loc[:, ["token_freq", "typef_1", "typef_2"]].apply(
+                lambda x: np.log(x)
+            )
+        )
 
-        normalized_results["entropy_1"] = normalized_results["entropy_1"].apply(
+        normalized_results.loc[:, "entropy_1"] = normalized_results.loc[
+            :, "entropy_1"
+        ].apply(
             lambda x: max(entropy_limits[0], x),
         )
 
-        normalized_results["entropy_2"] = normalized_results["entropy_2"].apply(
+        normalized_results.loc[:, "entropy_2"] = normalized_results.loc[
+            :, "entropy_2"
+        ].apply(
             lambda x: max(entropy_limits[0], x),
         )
-        normalized_results["entropy_1"] = normalized_results["entropy_1"].apply(
+        normalized_results.loc[:, "entropy_1"] = normalized_results.loc[
+            :, "entropy_1"
+        ].apply(
             lambda x: min(entropy_limits[1], x),
         )
-        normalized_results["entropy_2"] = normalized_results["entropy_2"].apply(
+        normalized_results.loc[:, "entropy_2"] = normalized_results.loc[
+            :, "entropy_2"
+        ].apply(
             lambda x: min(entropy_limits[1], x),
         )
-        normalized_results[
-            ["token_freq", "typef_1", "typef_2", "entropy_1", "entropy_2"]
-        ] = normalized_results[
-            ["token_freq", "typef_1", "typef_2", "entropy_1", "entropy_2"]
+        normalized_results.loc[
+            :, ["token_freq", "typef_1", "typef_2", "entropy_1", "entropy_2"]
+        ] = normalized_results.loc[
+            :, ["token_freq", "typef_1", "typef_2", "entropy_1", "entropy_2"]
         ].apply(lambda x: self._min_max(x))
 
-        normalized_results[["dispersion", "typef_1", "typef_2"]] = normalized_results[
-            ["dispersion", "typef_1", "typef_2"]
-        ].apply(lambda x: 1 - x)
-
-        return (
-            pd.concat([normalized_results, norm_no_data])
-            if len(norm_no_data) > 0
-            else normalized_results
+        normalized_results.loc[:, ["dispersion", "typef_1", "typef_2"]] = (
+            normalized_results.loc[:, ["dispersion", "typef_1", "typef_2"]].apply(
+                lambda x: 1 - x
+            )
         )
+        if len(norm_no_data) > 0:
+            return cast(pd.DataFrame, pd.concat([normalized_results, norm_no_data]))
+        else:
+            return cast(pd.DataFrame, normalized_results)
 
     def _weight_results(
         self,
@@ -442,6 +451,8 @@ class Fetcher:
         ngrams: str | list,
         weights: list | dict = DEFAULT_WEIGHTS,
         mode: str = "normalized",
+        *,
+        verbose=False,
         **kwargs: str,
     ) -> dict:
         r"""Obtain MWU measures and score for the provided input.
@@ -479,13 +490,11 @@ class Fetcher:
             raise NotImplementedError(except_msg)
         if isinstance(ngrams, str):
             ngrams = ngrams.lower()
-            self._make_scores_text(str(ngrams), **kwargs)
+            ngrams = self._get_ngrams_text(str(ngrams), **kwargs)
         elif isinstance(ngrams, list):
             ngrams = [ngram.lower() for ngram in ngrams]
-            self._make_scores_ngrams(list(ngrams))
-        else:
-            exception_error = "Input must be text as a string or a list of ngrams."
-            raise TypeError(exception_error)
+            ngrams = list(ngrams)
+        self._make_scores_ngrams(list(ngrams), verbose=verbose)
         all_raw = pd.concat(
             [
                 self._bigram_scores,
@@ -516,5 +525,6 @@ class Fetcher:
                 ],
             )
             return {"raw": all_raw, "normalized": all_normalized}
-        error_message = "Specify either 'raw' or 'normalized' as a return mode"
-        raise RuntimeError(error_message)
+        else:
+            error_message = "Specify either 'raw' or 'normalized' as a return mode"
+            raise RuntimeError(error_message)

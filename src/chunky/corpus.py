@@ -1,21 +1,22 @@
 """Module for the Corpus class."""
 
-# TODO(omfgzell): Exception logic #06
-# TODO(omfgzell): Test individual measure methods #11
+# TODO: Exception logic #06
+# TODO: Test individual measure methods #11
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import reduce
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Type
+# import time
+# from threading import Thread
 
 import duckdb
 import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy import orm
 from sqlalchemy.sql import select
-from tqdm import tqdm
 
 from .create_corpus import (
     ALLOWED_CORPORA,
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 VALID_COLUMNS = ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
-_UNSET: Any = object()  # Sentinel for NgramQuery
+# _UNSET: Any = object()  # Sentinel for NgramQuery
 
 logger = logging.getLogger(__name__)
 Base = orm.declarative_base()
@@ -76,7 +77,7 @@ class QueryRef(Base):
     comp_2_hash = sa.Column(sa.BigInteger)
 
 
-def create_corpus_proportions(corpus_cols: list) -> tuple:
+def create_corpus_proportions(corpus_cols: list) -> Type:
     """Create ORM class with dynamic columns."""
     base = orm.declarative_base()
 
@@ -92,10 +93,10 @@ def create_corpus_proportions(corpus_cols: list) -> tuple:
     # Create class dynamically
     corpus_proportions = type("corpus_proportions", (base,), attrs)
 
-    return corpus_proportions, base
+    return corpus_proportions
 
 
-def create_filtered_db(corpus_cols: list) -> tuple:
+def create_filtered_db(corpus_cols: list) -> Type:
     """Create ORM class with dynamic columns."""
     base = orm.declarative_base()
 
@@ -113,7 +114,7 @@ def create_filtered_db(corpus_cols: list) -> tuple:
     # Create class dynamically
     filtered_db = type("FilteredDB", (base,), attrs)
 
-    return filtered_db, base
+    return filtered_db
 
 
 @dataclass
@@ -134,11 +135,9 @@ class NgramQuery:
 
     """
 
-    query: sa.Select = field(init=False, default=_UNSET)
-    freq_table: type[orm.DeclarativeBase] = field(init=False, default=_UNSET)
-    total_proportions: type[orm.DeclarativeBase] = field(init=False, default=_UNSET)
     results: Any  # Messy with the CTE stuff. Leave it as Any.
-    query_ref: type[orm.DeclarativeBase] = field(init=False, default=_UNSET)
+    freq_table: Type
+    corpus_proportions: Type
     ngrams: list
     source: str
     target: str
@@ -345,10 +344,7 @@ class Corpus:
         """
         query_df = pd.DataFrame(
             ngram_query.ngrams,
-            columns=[
-                ngram_query.source,
-                ngram_query.target,
-            ],
+            columns=pd.Index([ngram_query.source, ngram_query.target]),
         )
 
         with self._engine.connect() as conn:
@@ -436,6 +432,7 @@ class Corpus:
         query = QueryRef
 
         reduced_query = select(
+            query.id.label("id"),
             query.comp_1_hash.label("comp_1"),
             query.comp_2_hash.label("comp_2"),
         ).where(
@@ -491,13 +488,13 @@ class Corpus:
             for column in parquet_columns
             if column[0] not in ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
         ]
-        filtered_db, _ = create_filtered_db(corpus_columns)
-        corpus_proportions, _ = create_corpus_proportions(corpus_columns)
-        ngram_query.query = reduced_query
-        ngram_query.results = reduced_query
+        filtered_db = create_filtered_db(corpus_columns)
+        corpus_proportions = create_corpus_proportions(corpus_columns)
+        reduced_query = ReducedQuery
+
         ngram_query.freq_table = filtered_db
-        ngram_query.total_proportions = corpus_proportions
-        ngram_query.query_ref = query
+        ngram_query.corpus_proportions = corpus_proportions
+        ngram_query.results = reduced_query
         return ngram_query
 
     def _join_with_query(
@@ -619,7 +616,7 @@ class Corpus:
         """
         # Should I make this reduced_table before and pass it down instead?
         reduced_query = ngram_query.results
-        corpus_proportions = ngram_query.total_proportions
+        corpus_proportions = ngram_query.corpus_proportions
         db = ngram_query.freq_table
 
         reduced_table = select(
@@ -994,7 +991,7 @@ class Corpus:
             length (int): The length of the queried ngrams.
 
         """
-        query_ref = ngram_query.query_ref
+        query_ref = QueryRef
         results = ngram_query.results
 
         results = select(
@@ -1021,33 +1018,17 @@ class Corpus:
             source/target information.
 
         """
-        with tqdm(total=8, unit="step", leave=True) as pbar:
-            pbar.update(1)
-            logger.debug("Computing token frequencies...")
-            token_freq = self._get_token_freq(ngram_query)
-            pbar.update(1)
-            logger.debug("Making reduced table...")
-            ngram_query = self._reduce_query(ngram_query)
-            ngram_query.update_results(token_freq)
-            pbar.update(1)
-            logger.debug("Computing type frequencies...")
-            self._get_type_freq_sa(ngram_query)
-            pbar.update(1)
-            logger.debug("Computing dispersion...")
-            self._get_dispersion_sa(ngram_query)
-            pbar.update(1)
-            logger.debug("Computing association...")
-            self._get_associations_sa(ngram_query)
-            pbar.update(1)
-            logger.debug("Computing entropy...")
-            self._get_entropies_sa(ngram_query)
-            pbar.update(1)
-            logger.debug("Joining results...")
-            self._join_measures(ngram_query)
-            pbar.update(1)
-            return ngram_query
+        token_freq = self._get_token_freq(ngram_query)
+        ngram_query = self._reduce_query(ngram_query)
+        ngram_query.update_results(token_freq)
+        self._get_type_freq_sa(ngram_query)
+        self._get_dispersion_sa(ngram_query)
+        self._get_associations_sa(ngram_query)
+        self._get_entropies_sa(ngram_query)
+        self._join_measures(ngram_query)
+        return ngram_query
 
-    def get_scores(self, ngram_query: NgramQuery) -> pd.DataFrame:
+    def get_scores(self, ngram_query: NgramQuery, *, verbose=False) -> pd.DataFrame:
         """Compute all ngram measures for a given set of ngrams.
 
         Given a list of ngrams, compute and obtain all ngram measures on the list.
@@ -1066,6 +1047,25 @@ class Corpus:
         """
         self._create_query(ngram_query)
         ngram_query = self._get_all_scores(ngram_query)
+        # executing = True
+
+        # def spinner():
+        #     i = 0
+        #     while executing:
+        #         prit(
+        #             f"\rExecuting... {['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][i % 10]}",
+        #             end="",
+        #             flush=True,
+        #         )
+        #         time.sleep(0.1)
+        #         i += 1
+        #
+        # spinner_thread = Thread(target=spinner, daemon=True)
+        # spinner_thread.start()
         with self._engine.connect() as conn:
+            if verbose:
+                conn.execute(sa.text("SET enable_progress_bar=true"))
+                conn.execute(sa.text("SET progress_bar_time=500"))
+            conn.execute(sa.text("SET enable_progress_bar_print=true"))
             results = conn.execute(select(ngram_query.results)).fetchall()
         return pd.DataFrame(results)

@@ -5,6 +5,7 @@ import re
 from functools import reduce
 from pathlib import Path
 
+
 import duckdb
 import pandas as pd
 
@@ -87,25 +88,14 @@ def init_corpus(path: Path) -> None:
 def _get_chunk_dfs(ngrams: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     chunk_unigrams = ngrams["unigrams"]
     chunk_ngrams = ngrams["fourgrams"]
+
     chunk_unigrams = pd.DataFrame(
-        chunk_unigrams,
-        columns=[
-            "corpus",
-            "ug",
-            "freq",
-        ],
+        chunk_unigrams, columns=pd.Index(["corpus", "ug", "freq"])
     )
     chunk_unigrams["corpus"] = chunk_unigrams["corpus"].astype(str)
     chunk_ngrams = pd.DataFrame(
         chunk_ngrams,
-        columns=[
-            "corpus",
-            "ug_1",
-            "ug_2",
-            "ug_3",
-            "ug_4",
-            "freq",
-        ],
+        columns=pd.Index(["corpus", "ug_1", "ug_2", "ug_3", "ug_4", "freq"]),
     )
     chunk_ngrams["corpus"] = chunk_ngrams["corpus"].astype(str)
     chunk_ngrams["big_1"] = chunk_ngrams["ug_1"] + " " + chunk_ngrams["ug_2"]

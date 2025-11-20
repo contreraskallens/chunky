@@ -9,17 +9,18 @@ from chunky.corpus_helper import Fetcher
 
 
 helper = Fetcher(
-    "coca",
+    "coca_sample",
 )
 
 sentence = (
     "Hello! Come in and eat boiled potatoes they are some of the most but it was never"
 )
-x = helper.get_mwu_scores(sentence)
+x = helper.get_mwu_scores(sentence, verbose=False)
 print(x)
 print(
     helper.get_mwu_scores(
         ["Come in and eat", "I don't want to", "What do you know"],
         mode="normalized",
+        verbose=False,
     )
 )

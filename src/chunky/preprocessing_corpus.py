@@ -1,7 +1,7 @@
 """Module for cleaning lines of corpora."""
 
-# TODO(omfgzell): provide own corpus #06
-# TODO(omfgzell): make it so that corpus key can contain multiple subcorpora.  Currently only supports one as a string #10
+# TODO: provide own corpus #06
+# TODO: make it so that corpus key can contain multiple subcorpora.  Currently only supports one as a string #10
 from __future__ import annotations
 
 import logging
@@ -29,14 +29,13 @@ def _clean_bnc(
         raw_lines (str | list[str]): Lines from the corpus file. Can be either
         a single string or a list of strings for more efficient processing.
         **kwargs: Just a placeholder.
-    #!TODO Fix
 
     Returns:
         list: A list of tuples of corpus IDs, list of clean lines.
 
     """
     placeholder = kwargs.get("nothing")
-    logger.debug(placeholder)  # TODO(omfgzell): fix this #1X
+    logger.debug(placeholder)  # TODO: fix this #1X
     all_lines = pd.Series(raw_lines)
     corpus_list = all_lines.str.extract(
         r"(^.)",
