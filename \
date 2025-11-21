@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from functools import reduce
-from threading import Thread
 from typing import TYPE_CHECKING, Type
 
+# import time
+# from threading import Thread
 import duckdb
 import pandas as pd
 import sqlalchemy as sa
@@ -638,7 +638,7 @@ class Corpus:
     def _get_rel_freqs(
         self,
         db: type[orm.DeclarativeBase],
-    ) -> sa.Select:
+    ) -> sa.Selectable:
         source_freq = select(
             get_column(db, "comp_1"),
             sa.func.sum(get_column(db, "freq")).label("source_freq"),
@@ -673,27 +673,24 @@ class Corpus:
             (get_column(target_freq, "comp_2") == get_column(ReducedQuery, "comp_2")),
         )
 
-    def _get_probs(self, rel_freq: sa.Select) -> sa.Select:
-        rel_freq_cte = rel_freq.cte()
-        filtered_rel_freq = select(
-            rel_freq_cte, get_column(TokenFreq, "token_freq")
-        ).join(
+    def _get_probs(self, rel_freq: sa.CTE) -> sa.Select:
+        filtered_rel_freq = select(rel_freq, get_column(TokenFreq, "token_freq")).join(
             TokenFreq,
-            (get_column(rel_freq_cte, "comp_1") == get_column(TokenFreq, "comp_1"))
-            & (get_column(rel_freq_cte, "comp_2") == get_column(TokenFreq, "comp_2")),
+            (get_column(rel_freq, "comp_1") == get_column(Token_Freq, "comp_1"))
+            & (get_column(rel_freq, "comp_2") == get_column(TokenFreq, "comp_2")),
         )
         filtered_rel_freq = filtered_rel_freq.cte()
         probs = select(
             get_column(filtered_rel_freq, "comp_1"),
             get_column(filtered_rel_freq, "comp_2"),
             (
-                get_column(filtered_rel_freq, "token_freq")
+                get_column(filtered_rel_freq, "freq")
                 / get_column(filtered_rel_freq, "source_freq")
             ).label(
                 "prob_2_1",
             ),
             (
-                get_column(filtered_rel_freq, "token_freq")
+                get_column(filtered_rel_freq, "freq")
                 / get_column(filtered_rel_freq, "target_freq")
             ).label(
                 "prob_1_2",
@@ -724,10 +721,11 @@ class Corpus:
         kld_2 = self._get_kld(*pair_2)
         return self._normalize_kld(kld_1 + kld_2)
 
-    def _get_associations(self, ngram_query: NgramQuery) -> sa.Select:
+    def _get_associations(self, ngram_query: NgramQuery) -> None:
+        reduced_query = ngram_query.results
         db = ngram_query.freq_table
         rel_freq = self._get_rel_freqs(db)
-        # print(pd.read_sql(rel_freq, self._engine))
+        print(pd.read_sql(select(TokenFreq), self._engine))
         probs = self._get_probs(rel_freq).cte()
         fw_assoc = self._get_normalized_kld(
             (get_column(probs, "prob_2_1"), get_column(probs, "prob_2")),
@@ -737,16 +735,30 @@ class Corpus:
             (get_column(probs, "prob_1_2"), get_column(probs, "prob_1")),
             (get_column(probs, "prob_no_1_2"), get_column(probs, "prob_no_1")),
         )
+
         assoc_table = select(
             get_column(probs, "comp_1"),
             get_column(probs, "comp_2"),
             fw_assoc.label("fw_assoc"),
             bw_assoc.label("bw_assoc"),
         )
-        return assoc_table
+        assoc_table = assoc_table.cte()
+        results = self._join_with_query(
+            reduced_query,
+            assoc_table,
+            "fw_assoc",
+        )
+        results = results.cte()
+        results = self._join_with_query(
+            results,
+            assoc_table,
+            "bw_assoc",
+        )
+        # ngram_query.update_results(results)
 
     def _get_total_freq(
         self,
+        reduced_query: sa.Select | sa.Selectable,
         db: type[orm.DeclarativeBase] | sa.CTE,
         column: str,
         *,
@@ -758,7 +770,7 @@ class Corpus:
         token_freq = select(
             *id_columns,
             get_column(db, "freq"),
-        ).where(get_column(db, column).in_(select(get_column(ReducedQuery, column))))
+        ).where(get_column(db, column).in_(select(get_column(reduced_query, column))))
         token_freq = token_freq.cte()
         id_columns = [get_column(token_freq, column)]
         if cf:
@@ -801,15 +813,16 @@ class Corpus:
 
     def _compute_entropy(
         self,
+        reduced_query: sa.Select | sa.Selectable,
         db: type[orm.DeclarativeBase] | sa.CTE,
         source_column: str,
         *,
         cf: bool = False,
     ) -> sa.Select:
         if cf:
-            total_freq = self._get_total_freq(db, source_column, cf=True)
+            total_freq = self._get_total_freq(reduced_query, db, source_column, cf=True)
         else:
-            total_freq = self._get_total_freq(db, source_column)
+            total_freq = self._get_total_freq(reduced_query, db, source_column)
         total_freq = total_freq.cte()
 
         weighted_info = select(
@@ -840,19 +853,20 @@ class Corpus:
 
     def _get_mult_table(
         self,
+        reduced_query: sa.Selectable,
         db: type[orm.DeclarativeBase]
         | sa.CTE,  # DeclarativeBase for original CTE for CF
         source_column: str,
         target_column: str,
     ) -> sa.Select:
         mult_table = select(
-            get_column(ReducedQuery, source_column).label(source_column),
-            get_column(ReducedQuery, target_column).label("target"),
+            get_column(reduced_query, source_column).label(source_column),
+            get_column(reduced_query, target_column).label("target"),
             get_column(db, target_column).label(target_column),
             get_column(db, "freq"),
         ).join(
             db,
-            (get_column(ReducedQuery, source_column) == get_column(db, source_column)),
+            (get_column(reduced_query, source_column) == get_column(db, source_column)),
         )
         mult_table = mult_table.cte()
         return select(mult_table).where(
@@ -892,18 +906,21 @@ class Corpus:
 
     def _get_entropy(
         self,
+        reduced_query: sa.Selectable,
         db: type[orm.DeclarativeBase],
         source_column: str,
         target_column: str,
     ) -> sa.Select:
         mult_table = self._get_mult_table(
+            reduced_query,
             db,
             source_column,
             target_column,
         )
         mult_table = mult_table.cte()
-        entropy_real = self._compute_entropy(db, source_column)
+        entropy_real = self._compute_entropy(reduced_query, db, source_column)
         entropy_cf = self._compute_entropy(
+            reduced_query,
             mult_table,
             source_column,
             cf=True,
@@ -915,31 +932,30 @@ class Corpus:
             target_column,
         )
 
-    def _get_entropies(self, ngram_query: NgramQuery) -> sa.Select:
+    def _get_entropies(self, ngram_query: NgramQuery) -> None:
+        reduced_query = ngram_query.results
         db = ngram_query.freq_table
-        entropy_1 = self._get_entropy(db, "comp_2", "comp_1")
+        entropy_1 = self._get_entropy(reduced_query, db, "comp_2", "comp_1")
         entropy_1 = entropy_1.cte()
-        entropy_2 = self._get_entropy(db, "comp_1", "comp_2")
+        entropy_2 = self._get_entropy(reduced_query, db, "comp_1", "comp_2")
         entropy_2 = entropy_2.cte()
-        return (
-            select(
-                ReducedQuery,
-                get_column(entropy_1, "entropy_diff").label("entropy_1"),
-                get_column(entropy_2, "entropy_diff").label("entropy_2"),
-            )
-            .join(
-                entropy_1,
-                (ReducedQuery.comp_1 == get_column(entropy_1, "comp_1"))
-                & (ReducedQuery.comp_2 == get_column(entropy_1, "comp_2")),
-            )
-            .join(
-                entropy_2,
-                (ReducedQuery.comp_1 == get_column(entropy_2, "comp_1"))
-                & (ReducedQuery.comp_2 == get_column(entropy_2, "comp_2")),
-            )
-        )
 
-    def _join_measures(self, ngram_query: NgramQuery) -> sa.CTE:
+        results = self._join_with_query(
+            reduced_query,
+            entropy_1,
+            "entropy_diff",
+            alt_name="entropy_1",
+        )
+        results = results.cte()
+        results = self._join_with_query(
+            results,
+            entropy_2,
+            "entropy_diff",
+            alt_name="entropy_2",
+        )
+        # ngram_query.update_results(results)
+
+    def _join_measures(self, ngram_query: NgramQuery) -> None:
         """Join all pre-allocated measures into a single table.
 
         Does it for a specified length to add an ngram_length field.
@@ -950,26 +966,26 @@ class Corpus:
             length (int): The length of the queried ngrams.
 
         """
-        results_cte = [result.cte() for result in ngram_query.results]
+        query_ref = QueryRef
+        results = ngram_query.results
 
-        all_results = select(ReducedQuery).cte()
+        results = select(
+            get_column(query_ref, "comp_1"),
+            get_column(query_ref, "comp_2"),
+            *[
+                get_column(results, column.name)
+                for column in results.c
+                if column.name not in ["id", "comp_1", "comp_2"]
+            ],
+            sa.literal(ngram_query.length).label("ngram_length"),
+        ).join(
+            results,
+            (get_column(query_ref, "comp_1_hash") == get_column(results, "comp_1"))
+            & (get_column(query_ref, "comp_2_hash") == get_column(results, "comp_2")),
+        )
+        # ngram_query.update_results(results)
 
-        for result in results_cte:
-            measure_columns = [
-                column
-                for column in result.c
-                if column.name not in ["comp_1", "comp_2", "id"]
-            ]
-            all_results = select(all_results, *measure_columns).join(
-                result,
-                (get_column(all_results, "comp_1") == get_column(result, "comp_1"))
-                & (get_column(all_results, "comp_2") == get_column(result, "comp_2")),
-            )
-            all_results = all_results.cte()
-
-        return all_results
-
-    def _get_all_scores(self, ngram_query: NgramQuery) -> sa.CTE:
+    def _get_all_scores(self, ngram_query: NgramQuery) -> NgramQuery:
         """Allocate all measures for the ngrams in the query table.
 
         Args:
@@ -983,9 +999,10 @@ class Corpus:
         )  # TODO: Must be a better way to do this
         ngram_query.results.append(self._get_type_freq(ngram_query))
         ngram_query.results.append(self._get_dispersion(ngram_query))
-        ngram_query.results.append(self._get_associations(ngram_query))
-        ngram_query.results.append(self._get_entropies(ngram_query))
-        return self._join_measures(ngram_query)
+        self._get_associations(ngram_query)
+        self._get_entropies(ngram_query)
+        self._join_measures(ngram_query)
+        return ngram_query
 
     def get_scores(self, ngram_query: NgramQuery, *, verbose=False) -> pd.DataFrame:
         """Compute all ngram measures for a given set of ngrams.
@@ -1005,26 +1022,26 @@ class Corpus:
 
         """
         self._create_query(ngram_query)
-        all_scores = self._get_all_scores(ngram_query)
+        ngram_query = self._get_all_scores(ngram_query)
+        # executing = True
 
-        def spinner():
-            i = 0
-            while executing:
-                print(
-                    f"\rExecuting... {['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][i % 10]}",
-                    end="",
-                    flush=True,
-                )
-                time.sleep(0.25)
-                i += 1
-
+        # def spinner():
+        #     i = 0
+        #     while executing:
+        #         prit(
+        #             f"\rExecuting... {['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][i % 10]}",
+        #             end="",
+        #             flush=True,
+        #         )
+        #         time.sleep(0.1)
+        #         i += 1
+        #
+        # spinner_thread = Thread(target=spinner, daemon=True)
+        # spinner_thread.start()
         with self._engine.connect() as conn:
             if verbose:
-                executing = True
-                spinner_thread = Thread(target=spinner, daemon=True)
-                spinner_thread.start()
-                # conn.execute(sa.text("SET enable_progress_bar=true"))
-                # conn.execute(sa.text("SET progress_bar_time=500"))
-                # conn.execute(sa.text("SET enable_progress_bar_print=true"))
-            results = conn.execute(select(all_scores)).fetchall()
+                conn.execute(sa.text("SET enable_progress_bar=true"))
+                conn.execute(sa.text("SET progress_bar_time=500"))
+            conn.execute(sa.text("SET enable_progress_bar_print=true"))
+            results = conn.execute(select(ngram_query.results)).fetchall()
         return pd.DataFrame(results)
