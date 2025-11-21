@@ -9,9 +9,9 @@ import logging
 from dataclasses import dataclass
 from functools import reduce
 from typing import TYPE_CHECKING, Any, Type
+
 # import time
 # from threading import Thread
-
 import duckdb
 import pandas as pd
 import sqlalchemy as sa
@@ -168,8 +168,7 @@ class NgramQuery:
 
 
 def get_column(
-    table: sa.Selectable | type[orm.DeclarativeBase],
-    column: str,
+    table: sa.Selectable | type[orm.DeclarativeBase], column: str
 ) -> sa.Column:
     if isinstance(table, (sa.Subquery, sa.Table, sa.CTE)):
         return getattr(table.c, column)
@@ -199,10 +198,7 @@ class Corpus:
     _ngram_db: Path
     _engine: sa.Engine
 
-    def __init__(
-        self,
-        corpus_name: str,
-    ) -> None:
+    def __init__(self, corpus_name: str) -> None:
         """Initialize an instance of a Corpus.
 
             Sets the paths to the database, parquet file, and temp directory.
@@ -242,10 +238,7 @@ class Corpus:
         self._path = corpus_file
         self._ngram_db = ngram_file
 
-        self._engine = sa.create_engine(
-            f"duckdb:///{self._path}",
-            echo=False,
-        )
+        self._engine = sa.create_engine(f"duckdb:///{self._path}", echo=False)
 
     def __call__(self, query: str) -> list:
         """Query the underlying database.
@@ -349,8 +342,7 @@ class Corpus:
 
         with self._engine.connect() as conn:
             conn.execute(
-                sa.text("register(:name, :df)"),
-                {"name": "query_df", "df": query_df},
+                sa.text("register(:name, :df)"), {"name": "query_df", "df": query_df}
             )
             query_ref_create = """
                 CREATE OR REPLACE TABLE query_ref (
@@ -506,8 +498,7 @@ class Corpus:
     ) -> sa.Select:
         if alt_name is None:
             select_statement = select(
-                query_table,
-                get_column(result_table, result_name),
+                query_table, get_column(result_table, result_name)
             )
         else:
             select_statement = select(
@@ -520,7 +511,7 @@ class Corpus:
             & (get_column(query_table, "comp_2") == get_column(result_table, "comp_2")),
         )
 
-    def _get_type_freq_sa(self, ngram_query: NgramQuery) -> None:
+    def _get_type_freq(self, ngram_query: NgramQuery) -> None:
         """Make a table with type frequencies for the queried ngrams.
 
         Args:
@@ -606,7 +597,7 @@ class Corpus:
         kld_column = self._sum_rows(distance_columns)
         return self._normalize_kld(kld_column)
 
-    def _get_dispersion_sa(self, ngram_query: NgramQuery) -> None:
+    def _get_dispersion(self, ngram_query: NgramQuery) -> None:
         """Make a table with a dispersion measure for the queried ngrams.
 
         Args:
@@ -742,7 +733,7 @@ class Corpus:
         kld_2 = self._get_kld(*pair_2)
         return self._normalize_kld(kld_1 + kld_2)
 
-    def _get_associations_sa(self, ngram_query: NgramQuery) -> None:
+    def _get_associations(self, ngram_query: NgramQuery) -> None:
         reduced_query = ngram_query.results
         db = ngram_query.freq_table
         rel_freq = self._get_rel_freqs(db, reduced_query).cte()  # pyright: ignore[reportAttributeAccessIssue]
@@ -836,7 +827,7 @@ class Corpus:
         info = sa.func.log2(prob)
         return prob * info
 
-    def _get_entropy(
+    def _compute_entropy(
         self,
         reduced_query: sa.Select | sa.Selectable,
         db: type[orm.DeclarativeBase] | sa.CTE,
@@ -929,7 +920,7 @@ class Corpus:
             ),
         )
 
-    def _get_entropy_sa(
+    def _get_entropy(
         self,
         reduced_query: sa.Selectable,
         db: type[orm.DeclarativeBase],
@@ -943,8 +934,8 @@ class Corpus:
             target_column,
         )
         mult_table = mult_table.cte()
-        entropy_real = self._get_entropy(reduced_query, db, source_column)
-        entropy_cf = self._get_entropy(
+        entropy_real = self._compute_entropy(reduced_query, db, source_column)
+        entropy_cf = self._compute_entropy(
             reduced_query,
             mult_table,
             source_column,
@@ -957,12 +948,12 @@ class Corpus:
             target_column,
         )
 
-    def _get_entropies_sa(self, ngram_query: NgramQuery) -> None:
+    def _get_entropies(self, ngram_query: NgramQuery) -> None:
         reduced_query = ngram_query.results
         db = ngram_query.freq_table
-        entropy_1 = self._get_entropy_sa(reduced_query, db, "comp_2", "comp_1")
+        entropy_1 = self._get_entropy(reduced_query, db, "comp_2", "comp_1")
         entropy_1 = entropy_1.cte()
-        entropy_2 = self._get_entropy_sa(reduced_query, db, "comp_1", "comp_2")
+        entropy_2 = self._get_entropy(reduced_query, db, "comp_1", "comp_2")
         entropy_2 = entropy_2.cte()
 
         results = self._join_with_query(
@@ -1021,10 +1012,10 @@ class Corpus:
         token_freq = self._get_token_freq(ngram_query)
         ngram_query = self._reduce_query(ngram_query)
         ngram_query.update_results(token_freq)
-        self._get_type_freq_sa(ngram_query)
-        self._get_dispersion_sa(ngram_query)
-        self._get_associations_sa(ngram_query)
-        self._get_entropies_sa(ngram_query)
+        self._get_type_freq(ngram_query)
+        self._get_dispersion(ngram_query)
+        self._get_associations(ngram_query)
+        self._get_entropies(ngram_query)
         self._join_measures(ngram_query)
         return ngram_query
 
