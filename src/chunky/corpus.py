@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from functools import reduce
 from threading import Thread
-from typing import TYPE_CHECKING, Type
+from typing import cast, TYPE_CHECKING
 
 import duckdb
 import pandas as pd
@@ -30,11 +30,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 VALID_COLUMNS = ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
-# _UNSET: Any = object()  # Sentinel for NgramQuery
 
 logger = logging.getLogger(__name__)
-Base = orm.declarative_base()
 
+class Base(orm.DeclarativeBase):
+    pass
 
 def _validate_query(ngram_query: NgramQuery) -> bool:
     return (
@@ -55,31 +55,30 @@ def _validate_corpus(corpus: Corpus) -> bool:
 
 
 class ReducedQuery(Base):
-    __tablename__ = "reduced_query"
-    id = sa.Column(sa.Integer, primary_key=True)
-    comp_1 = sa.Column(sa.BigInteger)
-    comp_2 = sa.Column(sa.BigInteger)
+    __tablename__: str = "reduced_query"
+    id: orm.Mapped[int] = orm.mapped_column(primary_key=True)
+    comp_1: orm.Mapped[int] = orm.mapped_column(sa.BigInteger)
+    comp_2: orm.Mapped[int] = orm.mapped_column(sa.BigInteger)
 
 
 class TokenFreq(Base):
-    __tablename__ = "token_freq"
-    comp_1 = sa.Column(sa.BigInteger, primary_key=True)
-    comp_2 = sa.Column(sa.BigInteger, primary_key=True)
-    token_freq = sa.Column(sa.Double)
+    __tablename__: str = "token_freq"
+    comp_1: orm.Mapped[int] = orm.mapped_column(sa.BigInteger, primary_key=True)
+    comp_2: orm.Mapped[int] = orm.mapped_column(sa.BigInteger, primary_key=True)
+    token_freq: orm.Mapped[float] = orm.mapped_column(sa.Double)
 
 
 class QueryRef(Base):
-    __tablename__ = "query_ref"
-    id = sa.Column(sa.Integer, primary_key=True)
-    comp_1 = sa.Column(sa.String)
-    comp_2 = sa.Column(sa.String)
-    comp_1_hash = sa.Column(sa.BigInteger)
-    comp_2_hash = sa.Column(sa.BigInteger)
+    __tablename__: str = "query_ref"
+    id: orm.Mapped[int] = orm.mapped_column(primary_key=True)
+    comp_1: orm.Mapped[str] = orm.mapped_column()
+    comp_2: orm.Mapped[str] = orm.mapped_column()
+    comp_1_hash: orm.Mapped[int] = orm.mapped_column(sa.BigInteger)
+    comp_2_hash: orm.Mapped[int] = orm.mapped_column(sa.BigInteger)
 
 
-def create_corpus_proportions(corpus_cols: list) -> Type:
+def create_corpus_proportions(corpus_cols: list[str]) -> type:
     """Create ORM class with dynamic columns."""
-    base = orm.declarative_base()
 
     # Build class attributes
     attrs = {
@@ -88,21 +87,21 @@ def create_corpus_proportions(corpus_cols: list) -> Type:
     }
     # Add dynamic sum columns
     for col_name in corpus_cols:
-        attrs[f"{col_name}"] = sa.Column(sa.Double)
+        attrs[col_name] = sa.Column(sa.Double)
 
     # Create class dynamically
-    corpus_proportions = type("corpus_proportions", (base,), attrs)
+    corpus_proportions = type("corpus_proportions", (Base,), attrs)
 
     return corpus_proportions
 
 
-def create_filtered_db(corpus_cols: list) -> Type:
+def create_filtered_db(corpus_cols: list[str]) -> type:
     """Create ORM class with dynamic columns."""
-    base = orm.declarative_base()
 
     # Build class attributes
-    attrs = {
+    attrs: dict[str, str | dict[str, bool] | sa.Column[int] | sa.Column[float]] = {
         "__tablename__": "filtered_db",
+        "__table_args__": {"extend_existing": True},
         "comp_1": sa.Column(sa.Integer, primary_key=True),
         "comp_2": sa.Column(sa.Integer, primary_key=True),
         "freq": sa.Column(sa.Double),
@@ -112,7 +111,7 @@ def create_filtered_db(corpus_cols: list) -> Type:
         attrs[f"{col_name}"] = sa.Column(sa.Double)
 
     # Create class dynamically
-    filtered_db = type("FilteredDB", (base,), attrs)
+    filtered_db = type("FilteredDB", (Base,), attrs)
 
     return filtered_db
 
@@ -135,17 +134,16 @@ class NgramQuery:
 
     """
 
-    results: list
-    freq_table: Type
-    corpus_proportions: Type
-    ngrams: list
+    results: list[sa.CTE]
+    freq_table: type
+    ngrams: list[str]
     source: str
     target: str
     length: int
 
     def __init__(
         self,
-        ngrams: list,
+        ngrams: list[str],
         source: str,
         target: str,
         length: int,
@@ -156,11 +154,6 @@ class NgramQuery:
         self.length = length
         self.results = []
 
-    # def update_results(self, new_results: sa.Selectable) -> None:
-    #     self.results = new_results
-    #     if isinstance(self.results, sa.HasCTE):
-    #         self.results = self.results.cte()
-
     def _validate_columns(self, name: str) -> str:
         if is_valid_identifier(name) and name in VALID_COLUMNS:
             return quote_identifier(name)
@@ -170,10 +163,10 @@ class NgramQuery:
 
 def get_column(
     table: sa.Selectable | type[orm.DeclarativeBase], column: str
-) -> sa.Column:
+) -> sa.Column[object]:
     if isinstance(table, (sa.Subquery, sa.Table, sa.CTE)):
-        return getattr(table.c, column)
-    return getattr(table, column)
+        return cast(sa.Column[object], getattr(table.c, column))
+    return cast(sa.Column[object], getattr(table, column))
 
 
 class Corpus:
@@ -238,8 +231,20 @@ class Corpus:
 
         self._path = corpus_file
         self._ngram_db = ngram_file
-
         self._engine = sa.create_engine(f"duckdb:///{self._path}", echo=False)
+        with self._engine.connect() as conn:
+            parquet_columns = conn.execute(
+                sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')"),  # noqa: S608 Validated before
+            ).fetchall()
+        corpus_columns = [
+            column[0]
+            for column in parquet_columns
+            if column[0] not in ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
+        ]
+        corpus_proportions = create_corpus_proportions(corpus_columns)
+        self._corpus_proportions: type[orm.DeclarativeBase] = corpus_proportions
+
+
 
     def __call__(self, query: str) -> list:
         """Query the underlying database.
@@ -485,10 +490,8 @@ class Corpus:
             if column[0] not in ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
         ]
         filtered_db = create_filtered_db(corpus_columns)
-        corpus_proportions = create_corpus_proportions(corpus_columns)
 
         ngram_query.freq_table = filtered_db
-        ngram_query.corpus_proportions = corpus_proportions
         return ngram_query
 
     def _join_with_query(
@@ -607,7 +610,7 @@ class Corpus:
 
         """
         # Should I make this reduced_table before and pass it down instead?
-        corpus_proportions = ngram_query.corpus_proportions
+        corpus_proportions = self._corpus_proportions
         db = ngram_query.freq_table
 
         reduced_table = select(

@@ -1,11 +1,12 @@
 """Module for the Fetcher class."""
-
-# TODO: Variable max length of ngram #08
-# TODO: Exception logic #10
-# TODO: make method for large batches and for specific measures. #12
-# TODO: Check that weights sum 1 #13
-# TODO: test for corpora other than CoCA. #14
-# TODO: Return dataclass instead of tuples and dictionaries #15
+# TODO: ngram_length for return frame
+# TODO: dtypes of dataframes
+# TODO: Variable max length of ngram
+# TODO: Exception logic
+# TODO: make method for large batches and for specific measures.
+# TODO: Check that weights sum 1
+# TODO: test for corpora other than CoCA
+# TODO: Return dataclass instead of tuples and dictionaries 
 
 from __future__ import annotations
 
@@ -322,9 +323,10 @@ class Fetcher:
         if entropy_limits is None:
             entropy_limits = [-0.1, 0.1]
         normalized_results = results.copy()
-        norm_no_data = normalized_results[results.isna().any(axis=1)]
-        norm_no_data = norm_no_data.loc[:, ["comp_1", "comp_2", "ngram_length"]]
-        norm_no_data = norm_no_data.fillna(pd.NA)
+        norm_no_data = normalized_results[normalized_results.isna().any(axis=1)]
+        if len(norm_no_data) > 0:
+            norm_no_data = norm_no_data.loc[:, ["comp_1", "comp_2"]]
+            norm_no_data = norm_no_data.fillna(pd.NA)
         normalized_results = normalized_results[normalized_results.notna().all(axis=1)]
         normalized_results.loc[:, ["token_freq", "typef_1", "typef_2"]] = (
             normalized_results.loc[:, ["token_freq", "typef_1", "typef_2"]].apply(
