@@ -9,7 +9,7 @@ from chunky.corpus_helper import Fetcher
 
 
 helper = Fetcher(
-    "coca_sample",
+    "coca",
 )
 
 sentence = (

@@ -14,6 +14,7 @@ from typing import cast, TYPE_CHECKING
 
 import duckdb
 import pandas as pd
+from rich.console import Console
 import sqlalchemy as sa
 from sqlalchemy import orm
 from sqlalchemy.sql import select
@@ -116,6 +117,15 @@ def create_filtered_db(corpus_cols: list[str]) -> type:
     return filtered_db
 
 
+def benchmark_query(query_name, query_sql, con):
+    start = time.time()
+    table = con.execute(query_sql).fetchall()
+    table = pd.DataFrame(table)
+    elapsed = time.time() - start
+    print(f"{query_name}: {elapsed:.2f} seconds")
+    print(table)
+    return elapsed
+
 @dataclass
 class NgramQuery:
     # ? Maybe I can add the batches here?
@@ -135,7 +145,6 @@ class NgramQuery:
     """
 
     results: list[sa.CTE]
-    freq_table: type
     ngrams: list[str]
     source: str
     target: str
@@ -191,6 +200,8 @@ class Corpus:
     _path: Path
     _ngram_db: Path
     _engine: sa.Engine
+    _corpus_proportions: type[orm.DeclarativeBase] 
+    _filtered_db: type[orm.DeclarativeBase]
 
     def __init__(self, corpus_name: str) -> None:
         """Initialize an instance of a Corpus.
@@ -241,12 +252,10 @@ class Corpus:
             for column in parquet_columns
             if column[0] not in ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
         ]
-        corpus_proportions = create_corpus_proportions(corpus_columns)
-        self._corpus_proportions: type[orm.DeclarativeBase] = corpus_proportions
+        self._corpus_proportions = create_corpus_proportions(corpus_columns)
+        self._filtered_db = create_filtered_db(corpus_columns)
 
-
-
-    def __call__(self, query: str) -> list:
+    def __call__(self, query: str) -> list[tuple[object]]:
         """Query the underlying database.
 
         Args:
@@ -307,7 +316,12 @@ class Corpus:
             msg = "Problem with corpus information. Please initialize again"
             raise ValueError(msg)
         ngram_db_query = f"SELECT * FROM '{self._ngram_db}' LIMIT {limit}"  # noqa: S608
-        return pd.read_sql(ngram_db_query, self._engine)
+        ngram_data =  pd.read_sql_query(
+            ngram_db_query,
+            self._engine,
+        )
+        ngram_data: pd.DataFrame
+        return ngram_data
 
     def df(self, query: str, params: list | dict | None = None) -> pd.DataFrame:
         """Query the database and return as dataframe.
@@ -347,7 +361,7 @@ class Corpus:
         )
 
         with self._engine.connect() as conn:
-            conn.execute(
+            _ = conn.execute(
                 sa.text("register(:name, :df)"), {"name": "query_df", "df": query_df}
             )
             query_ref_create = """
@@ -359,7 +373,7 @@ class Corpus:
                     comp_2_hash UINT64
                 )
                 """
-            conn.execute(sa.text(query_ref_create))
+            _ = conn.execute(sa.text(query_ref_create))
 
             if _validate_query(ngram_query):
                 query_ref_insert = f"""
@@ -377,7 +391,7 @@ class Corpus:
             else:
                 msg = "Not valid column"
                 raise ValueError(msg)
-            conn.execute(sa.text(query_ref_insert))
+            _ = conn.execute(sa.text(query_ref_insert))
             conn.commit()
 
     def _get_token_freq(self, ngram_query: NgramQuery) -> sa.Select:
@@ -411,11 +425,11 @@ class Corpus:
             query_ref.comp_1_hash, query_ref.comp_2_hash
                 """  # noqa: S608 Validated before
         with self._engine.connect() as conn:
-            conn.execute(sa.text(token_freq_query))
+            _ = conn.execute(sa.text(token_freq_query))
             conn.commit()
         return select(TokenFreq)
 
-    def _reduce_query(self, ngram_query: NgramQuery) -> NgramQuery:
+    def _reduce_query(self, ngram_query: NgramQuery) -> None:
         """Make a reduced query table that includes only ngrams with token_freq > 0.
 
         This is a substantial memory and runtime save for later operations. It
@@ -433,9 +447,6 @@ class Corpus:
             QueryRef.id.label("id"),
             QueryRef.comp_1_hash.label("comp_1"),
             QueryRef.comp_2_hash.label("comp_2"),
-            # query.id.label("id"),
-            # query.comp_1_hash.label("comp_1"),
-            # query.comp_2_hash.label("comp_2"),
         ).where(
             sa.exists().where(
                 (TokenFreq.comp_1 == QueryRef.comp_1_hash)
@@ -448,14 +459,23 @@ class Corpus:
         if not _validate_corpus(self):
             msg = "Problem with corpus information. Please initialize again"
             raise ValueError(msg)
+        with self._engine.connect() as conn:
+            parquet_columns = conn.execute(
+                sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')"),  # noqa: S608 Validated before
+            ).fetchall()
+        corpus_columns = [
+            column[0]
+            for column in parquet_columns
+            if column[0] not in ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
+        ]
+        corpus_columns.sort() 
+        corpus_sums = ", ".join([f"SUM({column}) AS {column}" for column in corpus_columns])
         filter_query = f"""
                 CREATE OR REPLACE TABLE filtered_db AS
                 SELECT
                     {quote_identifier(ngram_query.source)} AS comp_1,
                     {quote_identifier(ngram_query.target)} AS comp_2,
-                    SUM(
-                        COLUMNS(* EXCLUDE(ug_1, ug_2, ug_3, ug_4, big_1, trig_1))
-                    )
+                    {corpus_sums}
                 FROM
                     READ_PARQUET('{self._ngram_db}')
                 WHERE
@@ -463,7 +483,7 @@ class Corpus:
                         SELECT
                             comp_1
                         FROM
-                            token_freq
+                            reduced_query
                     )
                     OR {ngram_query.target} IN (
                         SELECT
@@ -474,25 +494,12 @@ class Corpus:
                 GROUP BY
                     comp_1,
                     comp_2
-                """  # noqa: S608 Validated before
-        with self._engine.connect() as conn:
-            conn.execute(
-                sa.text(f"CREATE OR REPLACE TABLE reduced_query AS {reduced_query}"),
-            )
-            conn.execute(sa.text(filter_query))
-            conn.commit()
-            parquet_columns = conn.execute(
-                sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')"),  # noqa: S608 Validated before
-            ).fetchall()
-        corpus_columns = [
-            column[0]
-            for column in parquet_columns
-            if column[0] not in ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
-        ]
-        filtered_db = create_filtered_db(corpus_columns)
+                """
 
-        ngram_query.freq_table = filtered_db
-        return ngram_query
+        with self._engine.connect() as conn:
+            _ = conn.execute(sa.text(f"CREATE OR REPLACE TABLE reduced_query AS {reduced_query}"))
+            _ = conn.execute(sa.text(filter_query))
+            conn.commit()
 
     def _join_with_query(
         self,
@@ -524,7 +531,7 @@ class Corpus:
             source/target information.
 
         """
-        db = ngram_query.freq_table
+        db = self._filtered_db
         type_1_query = select(
             get_column(db, "comp_2"),
             sa.func.count().label("typef_1"),
@@ -594,10 +601,9 @@ class Corpus:
         self,
         corpus_columns: list,
         freqs: sa.Column,
-        corpus_proportions: type[orm.DeclarativeBase],
     ) -> sa.ColumnElement:
         prop_columns = self._get_prop_columns(corpus_columns, freqs)
-        distance_columns = self._get_distances(prop_columns, corpus_proportions)
+        distance_columns = self._get_distances(prop_columns, self._corpus_proportions)
         kld_column = self._sum_rows(distance_columns)
         return self._normalize_kld(kld_column)
 
@@ -610,8 +616,7 @@ class Corpus:
 
         """
         # Should I make this reduced_table before and pass it down instead?
-        corpus_proportions = self._corpus_proportions
-        db = ngram_query.freq_table
+        db = self._filtered_db
 
         reduced_table = select(
             db,
@@ -633,7 +638,6 @@ class Corpus:
                     if column.name not in ["comp_1", "comp_2", "id", "freq"]
                 ],
                 get_column(reduced_table, "freq"),
-                corpus_proportions,
             ).label("dispersion"),
         )
         return dispersion_table
@@ -728,7 +732,7 @@ class Corpus:
         return self._normalize_kld(kld_1 + kld_2)
 
     def _get_associations(self, ngram_query: NgramQuery) -> sa.Select:
-        db = ngram_query.freq_table
+        db = self._filtered_db
         rel_freq = self._get_rel_freqs(db)
         # print(pd.read_sql(rel_freq, self._engine))
         probs = self._get_probs(rel_freq).cte()
@@ -919,7 +923,7 @@ class Corpus:
         )
 
     def _get_entropies(self, ngram_query: NgramQuery) -> sa.Select:
-        db = ngram_query.freq_table
+        db = self._filtered_db
         entropy_1 = self._get_entropy(db, "comp_2", "comp_1")
         entropy_1 = entropy_1.cte()
         entropy_2 = self._get_entropy(db, "comp_1", "comp_2")
@@ -981,9 +985,7 @@ class Corpus:
 
         """
         ngram_query.results.append(self._get_token_freq(ngram_query))
-        ngram_query = self._reduce_query(
-            ngram_query
-        )  # TODO: Must be a better way to do this
+        self._reduce_query(ngram_query)
         ngram_query.results.append(self._get_type_freq(ngram_query))
         ngram_query.results.append(self._get_dispersion(ngram_query))
         ngram_query.results.append(self._get_associations(ngram_query))
@@ -1007,27 +1009,17 @@ class Corpus:
             for the queried ngrams.
 
         """
-        self._create_query(ngram_query)
-        all_scores = self._get_all_scores(ngram_query)
-
-        def spinner():
-            i = 0
-            while executing:
-                print(
-                    f"\rExecuting... {['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'][i % 10]}",
-                    end="",
-                    flush=True,
-                )
-                time.sleep(0.25)
-                i += 1
-
         with self._engine.connect() as conn:
             if verbose:
-                executing = True
-                spinner_thread = Thread(target=spinner, daemon=True)
-                spinner_thread.start()
-                # conn.execute(sa.text("SET enable_progress_bar=true"))
-                # conn.execute(sa.text("SET progress_bar_time=500"))
-                # conn.execute(sa.text("SET enable_progress_bar_print=true"))
-            results = conn.execute(select(all_scores)).fetchall()
+                console = Console()
+                # TODO: Better status info
+                with console.status("[bold red]Executing...", spinner='pong') as status:
+                    self._create_query(ngram_query)
+                    all_scores = self._get_all_scores(ngram_query)
+                    results = conn.execute(select(all_scores)).fetchall()
+                    status.update("[bold green]Done!")
+            else:
+                self._create_query(ngram_query)
+                all_scores = self._get_all_scores(ngram_query)
+                results = conn.execute(select(all_scores)).fetchall()
         return pd.DataFrame(results)
