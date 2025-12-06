@@ -318,7 +318,6 @@ class Fetcher:
 
         Returns:
             pd.DataFrame: A dataframe containing normalized measures.
-
         """
         if entropy_limits is None:
             entropy_limits = [-0.1, 0.1]
