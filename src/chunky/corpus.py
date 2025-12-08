@@ -9,7 +9,7 @@ import logging
 import time
 from dataclasses import dataclass
 from functools import reduce
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, TypeAlias
 
 import duckdb
 import pandas as pd
@@ -17,6 +17,7 @@ import sqlalchemy as sa
 from rich.console import Console
 from sqlalchemy import orm
 from sqlalchemy.sql import select
+from sqlalchemy.engine import Row
 
 from .create_corpus import (
     ALLOWED_CORPORA,
@@ -48,10 +49,10 @@ def _validate_query(ngram_query: NgramQuery) -> bool:
 
 
 def _validate_corpus(corpus: Corpus) -> bool:
-    corpus_file = corpus.get_path()
-    ngram_file = corpus.get_ngram_file()
-    corpus_check = corpus_file.is_relative_to(CORPUS_DIR.resolve())
-    ngram_check = ngram_file.is_relative_to(CORPUS_DIR.resolve())
+    corpus_file: Path = corpus.get_path()
+    ngram_file: Path = corpus.get_ngram_file()
+    corpus_check: bool = corpus_file.is_relative_to(CORPUS_DIR.resolve())
+    ngram_check: bool = ngram_file.is_relative_to(CORPUS_DIR.resolve())
 
     return corpus_check and ngram_check
 
@@ -79,11 +80,19 @@ class QueryRef(Base):
     comp_2_hash: orm.Mapped[int] = orm.mapped_column(sa.BigInteger)
 
 
-def create_corpus_proportions(corpus_cols: list[str]) -> type:
+PARQUET_ROW_STRUCT: TypeAlias = Row[
+    tuple[str, str, str, None, None, None]
+]  # Type structure of columns in the parquet file when queried by DESCRIBE
+RESULTS_ROW_STRUCT: TypeAlias = tuple[
+    ReducedQuery, float, float, float, float, float, float, float, float
+]  # Type structure of rows in the RESULTS table
+
+
+def create_corpus_proportions(corpus_cols: list[str]) -> type[orm.DeclarativeBase]:
     """Create ORM class with dynamic columns."""
 
     # Build class attributes
-    attrs = {
+    attrs: dict[str, str | sa.Column[int]] = {
         "__tablename__": "corpus_proportions",
         "id": sa.Column(sa.Integer, primary_key=True),
     }
@@ -92,12 +101,10 @@ def create_corpus_proportions(corpus_cols: list[str]) -> type:
         attrs[col_name] = sa.Column(sa.Double)
 
     # Create class dynamically
-    corpus_proportions = type("corpus_proportions", (Base,), attrs)
-
-    return corpus_proportions
+    return type("corpus_proportions", (Base,), attrs)
 
 
-def create_filtered_db(corpus_cols: list[str]) -> type:
+def create_filtered_db(corpus_cols: list[str]) -> type[orm.DeclarativeBase]:
     """Create ORM class with dynamic columns."""
 
     # Build class attributes
@@ -113,9 +120,7 @@ def create_filtered_db(corpus_cols: list[str]) -> type:
         attrs[f"{col_name}"] = sa.Column(sa.Double)
 
     # Create class dynamically
-    filtered_db = type("FilteredDB", (Base,), attrs)
-
-    return filtered_db
+    return type("FilteredDB", (Base,), attrs)
 
 
 def benchmark_query(query_name, query_sql, con):
@@ -237,23 +242,27 @@ class Corpus:
             raise ValueError(msg)
         self.corpus_name = corpus_name
 
-        corpus_file = CORPUS_DIR / f"{corpus_name}.db"
-        corpus_file = corpus_file.resolve()
-        ngram_file = CORPUS_DIR / f"{corpus_name}_ngrams.parquet"
-        ngram_file = ngram_file.resolve()
+        corpus_file: Path = (CORPUS_DIR / f"{corpus_name}.db").resolve()
+        ngram_file: Path = (CORPUS_DIR / f"{corpus_name}_ngrams.parquet").resolve()
 
         if not corpus_file.is_file() or not ngram_file.is_file():
-            error_message = "No corpus found. Make first with make_processed_corpus()."
+            error_message: str = (
+                "No corpus found. Make first with make_processed_corpus()."
+            )
             raise RuntimeError(error_message)
 
         self._path = corpus_file
         self._ngram_db = ngram_file
         self._engine = sa.create_engine(f"duckdb:///{self._path}", echo=False)
         with self._engine.connect() as conn:
-            parquet_columns = conn.execute(
-                sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')"),  # noqa: S608 Validated before
-            ).fetchall()
-        corpus_columns = [
+            parquet_columns = cast(
+                list[PARQUET_ROW_STRUCT],
+                conn.execute(
+                    sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')"),  # noqa: S608 Validated before
+                ).fetchall(),
+            )
+        print(parquet_columns)
+        corpus_columns: list[str] = [
             column[0]
             for column in parquet_columns
             if column[0] not in ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
@@ -272,7 +281,7 @@ class Corpus:
 
         """
         with duckdb.connect(self._path) as conn:
-            query_result = conn.execute(query)
+            query_result: duckdb.DuckDBPyConnection = conn.execute(query)
             return query_result.fetchall()
 
     def get_path(self) -> Path:
@@ -287,6 +296,8 @@ class Corpus:
             if not _validate_corpus(self):
                 msg = "Problem in corpus object. Please initialize again correctly."
                 raise ValueError(msg)
+
+            this_query: duckdb.DuckDBPyConnection
             if ug is None:
                 this_query = conn.execute(
                     f"""EXPLAIN ANALYZE
@@ -322,11 +333,10 @@ class Corpus:
             msg = "Problem with corpus information. Please initialize again"
             raise ValueError(msg)
         ngram_db_query = f"SELECT * FROM '{self._ngram_db}' LIMIT {limit}"  # noqa: S608
-        ngram_data = pd.read_sql_query(  # pyright: ignore[reportUnknownMemberType]
+        ngram_data: pd.DataFrame = pd.read_sql_query(  # pyright: ignore[reportUnknownMemberType]
             ngram_db_query,
             self._engine,
         )
-        ngram_data: pd.DataFrame
         return ngram_data
 
     def df(
@@ -349,6 +359,7 @@ class Corpus:
 
         """
         with duckdb.connect(self._path) as conn:
+            this_query: duckdb.DuckDBPyConnection
             if not params:
                 this_query = conn.execute(query)
             else:
@@ -365,7 +376,7 @@ class Corpus:
             source/target information.
 
         """
-        query_df = pd.DataFrame(
+        query_df: pd.DataFrame = pd.DataFrame(
             ngram_query.ngrams,
             columns=pd.Index([ngram_query.source, ngram_query.target]),
         )
@@ -450,10 +461,8 @@ class Corpus:
             source/target information.
 
         """
-        # token_freq = TokenFreq
-        # query = QueryRef
 
-        reduced_query = select(
+        reduced_query: sa.Select[tuple[int, int, int]] = select(
             QueryRef.id.label("id"),
             QueryRef.comp_1_hash.label("comp_1"),
             QueryRef.comp_2_hash.label("comp_2"),
@@ -470,9 +479,12 @@ class Corpus:
             msg = "Problem with corpus information. Please initialize again"
             raise ValueError(msg)
         with self._engine.connect() as conn:
-            parquet_columns = conn.execute(
-                sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')"),  # noqa: S608 Validated before
-            ).fetchall()
+            parquet_columns = cast(
+                list[PARQUET_ROW_STRUCT],
+                conn.execute(
+                    sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')"),  # noqa: S608 Validated before
+                ).fetchall(),
+            )
         corpus_columns: list[str] = [
             column[0]
             for column in parquet_columns
@@ -515,28 +527,6 @@ class Corpus:
             _ = conn.execute(sa.text(filter_query))
             conn.commit()
 
-    def _join_with_query(
-        self,
-        query_table: sa.CTE,
-        result_table: sa.CTE,
-        result_name: str,
-        alt_name: str | None = None,
-    ) -> sa.Select[tuple[int, int, float]]:
-        if alt_name is None:
-            select_statement = select(
-                query_table, get_column(result_table, result_name)
-            )
-        else:
-            select_statement = select(
-                query_table,
-                get_column(result_table, result_name).label(alt_name),
-            )
-        return select_statement.join(
-            result_table,
-            (get_column(query_table, "comp_1") == get_column(result_table, "comp_1"))
-            & (get_column(query_table, "comp_2") == get_column(result_table, "comp_2")),
-        )
-
     def _get_type_freq(self) -> sa.Select[tuple[ReducedQuery, object, object]]:
         """Make a table with type frequencies for the queried ngrams.
 
@@ -545,32 +535,32 @@ class Corpus:
             source/target information.
 
         """
-        db = self._filtered_db
-        type_1_query = select(
+
+        db: type[orm.DeclarativeBase] = self._filtered_db
+        type_1_query: sa.Select[tuple[object, int]] = select(
             get_column(db, "comp_2"),
             sa.func.count().label("typef_1"),
         )
         type_1_query = type_1_query.group_by(get_column(db, "comp_2"))
-        type_1_query = type_1_query.cte()
-        type_2_query = select(
+        type_1_cte: sa.CTE = type_1_query.cte()
+        type_2_query: sa.Select[tuple[object, int]] = select(
             get_column(db, "comp_1"),
             sa.func.count().label("typef_2"),
         )
         type_2_query = type_2_query.group_by(get_column(db, "comp_1"))
-        type_2_query = type_2_query.cte()
-        results = select(
+        type_2_cte: sa.CTE = type_2_query.cte()
+        results: sa.Select[tuple[ReducedQuery, object, object]] = select(
             ReducedQuery,
-            get_column(type_1_query, "typef_1"),
-            get_column(type_2_query, "typef_2"),
+            get_column(type_1_cte, "typef_1"),
+            get_column(type_2_cte, "typef_2"),
         )
-        results = results.join(
-            type_1_query,
+        return results.join(
+            type_1_cte,
             (get_column(ReducedQuery, "comp_2") == get_column(type_1_query, "comp_2")),
         ).join(
-            type_2_query,
+            type_2_cte,
             (get_column(ReducedQuery, "comp_1") == get_column(type_2_query, "comp_1")),
         )
-        return results
 
     def _get_prop_columns(
         self,
@@ -580,7 +570,7 @@ class Corpus:
         prop_columns: list[sa.ColumnElement[float]] = []
         for column in corpus_columns:
             column_name = cast(str, column.name)
-            prop_column = column / freq_column
+            prop_column: sa.ColumnElement[float] = column / freq_column
             prop_columns.append(prop_column.label(column_name))
         return prop_columns
 
@@ -600,12 +590,12 @@ class Corpus:
         all_corpus_props: type[orm.DeclarativeBase],
     ) -> list[sa.ColumnElement[float]]:
         # distance to corpus proportion
-        mapper_all = sa.inspect(all_corpus_props)
+        mapper_all: orm.Mapper[orm.DeclarativeBase] = sa.inspect(all_corpus_props)
         # Use scalar_subquery because corpus_proportion.X always has length=1
         kld_columns: list[sa.ColumnElement[float]] = []
         for column in prop_columns:
-            column_name: str = cast(str, column.name)
-            this_column: sa.ColumnElement[object] = cast(
+            column_name = cast(str, column.name)
+            this_column = cast(
                 sa.ColumnElement[object], mapper_all.columns[column_name]
             )
             this_kld: sa.ColumnElement[float] = self._get_kld(
@@ -630,9 +620,13 @@ class Corpus:
         corpus_columns: list[sa.ColumnElement[float]],
         freqs: sa.ColumnElement[float],
     ) -> sa.ColumnElement[float]:
-        prop_columns = self._get_prop_columns(corpus_columns, freqs)
-        distance_columns = self._get_distances(prop_columns, self._corpus_proportions)
-        kld_column = self._sum_rows(distance_columns)
+        prop_columns: list[sa.ColumnElement[float]] = self._get_prop_columns(
+            corpus_columns, freqs
+        )
+        distance_columns: list[sa.ColumnElement[float]] = self._get_distances(
+            prop_columns, self._corpus_proportions
+        )
+        kld_column: sa.ColumnElement[float] = self._sum_rows(distance_columns)
         return self._normalize_kld(kld_column)
 
     def _get_dispersion(self) -> sa.Select[tuple[ReducedQuery, object]]:
@@ -644,9 +638,9 @@ class Corpus:
 
         """
         # Should I make this reduced_table before and pass it down instead?
-        db = self._filtered_db
+        db: type[orm.DeclarativeBase] = self._filtered_db
 
-        reduced_table = select(
+        reduced_table: sa.Select[tuple[orm.DeclarativeBase]] = select(
             db,
         ).join(
             ReducedQuery,
@@ -654,15 +648,15 @@ class Corpus:
             & (get_column(ReducedQuery, "comp_2") == get_column(db, "comp_2")),
         )
 
-        reduced_table = reduced_table.cte()
+        reduced_cte: sa.CTE = reduced_table.cte()
 
         corpus_columns: list[sa.ColumnElement[float]] = []
-        for column in reduced_table.c:
-            column_name: str = cast(str, column.name)
+        for column in reduced_cte.c:
+            column_name = cast(str, column.name)
             if column_name not in ["comp_1", "comp_2", "id", "freq"]:
                 corpus_columns.append(column)
 
-        dispersion = select(
+        dispersion: sa.Select[tuple[object, object, float]] = select(
             get_column(reduced_table, "comp_1"),
             get_column(reduced_table, "comp_2"),
             self._get_dispersion_column(
@@ -670,9 +664,9 @@ class Corpus:
                 cast(sa.ColumnElement[float], get_column(reduced_table, "freq")),
             ).label("dispersion"),
         )
-        dispersion = dispersion.cte()
+        dispersion_cte: sa.CTE = dispersion.cte()
         return select(ReducedQuery, get_column(dispersion, "dispersion")).join(
-            dispersion,
+            dispersion_cte,
             (get_column(dispersion, "comp_1") == get_column(ReducedQuery, "comp_1"))
             & (get_column(dispersion, "comp_2") == get_column(ReducedQuery, "comp_2")),
         )
@@ -681,16 +675,16 @@ class Corpus:
         self,
         db: type[orm.DeclarativeBase],
     ) -> sa.Select[tuple[ReducedQuery, float, object, object]]:
-        source_freq = select(
+        source_freq: sa.Select[tuple[object, object]] = select(
             get_column(db, "comp_1"),
             sa.func.sum(get_column(db, "freq")).label("source_freq"),
         ).group_by(get_column(db, "comp_1"))
-        source_freq = source_freq.cte()
-        target_freq = select(
+        source_freq_cte: sa.CTE = source_freq.cte()
+        target_freq: sa.Select[tuple[object, object]] = select(
             get_column(db, "comp_2"),
             sa.func.sum(get_column(db, "freq")).label("target_freq"),
         ).group_by(get_column(db, "comp_2"))
-        target_freq = target_freq.cte()
+        target_freq_cte: sa.CTE = target_freq.cte()
         with self._engine.connect() as conn:
             total_freq_query: sa.Row[tuple[float]] = cast(
                 sa.Row[tuple[float]],
@@ -699,18 +693,18 @@ class Corpus:
                 ).fetchone(),
             )
         total_freq: float = cast(float, total_freq_query[0])
-        rel_freqs = select(
+        rel_freqs: sa.Select[tuple[ReducedQuery, float, object, object]] = select(
             ReducedQuery,
             sa.literal(total_freq).label("total_freq"),
-            get_column(source_freq, "source_freq"),
-            get_column(target_freq, "target_freq"),
+            get_column(source_freq_cte, "source_freq"),
+            get_column(target_freq_cte, "target_freq"),
         )
         rel_freqs = rel_freqs.join(
-            source_freq,
+            source_freq_cte,
             (get_column(source_freq, "comp_1") == get_column(ReducedQuery, "comp_1")),
         )
         return rel_freqs.join(
-            target_freq,
+            target_freq_cte,
             (get_column(target_freq, "comp_2") == get_column(ReducedQuery, "comp_2")),
         )
 
@@ -718,37 +712,37 @@ class Corpus:
         self,
         rel_freq: sa.Select[tuple[ReducedQuery, float, object, object]],
     ) -> sa.Select[tuple[object, object, object, object, object, object]]:
-        rel_freq_cte = rel_freq.cte()
-        filtered_rel_freq = select(
-            rel_freq_cte, get_column(TokenFreq, "token_freq")
-        ).join(
+        rel_freq_cte: sa.CTE = rel_freq.cte()
+        filtered_rel_freq: sa.Select[
+            tuple[ReducedQuery, float, object, object, object]
+        ] = select(rel_freq_cte, get_column(TokenFreq, "token_freq")).join(
             TokenFreq,
             (get_column(rel_freq_cte, "comp_1") == get_column(TokenFreq, "comp_1"))
             & (get_column(rel_freq_cte, "comp_2") == get_column(TokenFreq, "comp_2")),
         )
-        filtered_rel_freq = filtered_rel_freq.cte()
-        probs = select(
-            get_column(filtered_rel_freq, "comp_1"),
-            get_column(filtered_rel_freq, "comp_2"),
+        filtered_rel_cte: sa.CTE = filtered_rel_freq.cte()
+        probs: sa.CTE = select(
+            get_column(filtered_rel_cte, "comp_1"),
+            get_column(filtered_rel_cte, "comp_2"),
             (
-                get_column(filtered_rel_freq, "token_freq")
-                / get_column(filtered_rel_freq, "source_freq")
+                get_column(filtered_rel_cte, "token_freq")
+                / get_column(filtered_rel_cte, "source_freq")
             ).label(
                 "prob_2_1",
             ),
             (
-                get_column(filtered_rel_freq, "token_freq")
-                / get_column(filtered_rel_freq, "target_freq")
+                get_column(filtered_rel_cte, "token_freq")
+                / get_column(filtered_rel_cte, "target_freq")
             ).label(
                 "prob_1_2",
             ),
             (
-                get_column(filtered_rel_freq, "source_freq")
-                / get_column(filtered_rel_freq, "total_freq")
+                get_column(filtered_rel_cte, "source_freq")
+                / get_column(filtered_rel_cte, "total_freq")
             ).label("prob_1"),
             (
-                get_column(filtered_rel_freq, "target_freq")
-                / get_column(filtered_rel_freq, "total_freq")
+                get_column(filtered_rel_cte, "target_freq")
+                / get_column(filtered_rel_cte, "total_freq")
             ).label("prob_2"),
         ).cte()
         return select(
@@ -770,15 +764,17 @@ class Corpus:
         pair_2_float = cast(
             tuple[sa.ColumnElement[float], sa.ColumnElement[object]], pair_2
         )
-        kld_1 = self._get_kld(*pair_1_float)
-        kld_2 = self._get_kld(*pair_2_float)
+        kld_1: sa.Case[float] = self._get_kld(*pair_1_float)
+        kld_2: sa.Case[float] = self._get_kld(*pair_2_float)
         return self._normalize_kld(kld_1 + kld_2)
 
     def _get_associations(self) -> sa.Select[tuple[ReducedQuery, object, object]]:
-        db = self._filtered_db
-        rel_freq = self._get_rel_freqs(db)
-        probs = self._get_probs(rel_freq).cte()
-        fw_assoc = select(
+        db: type[orm.DeclarativeBase] = self._filtered_db
+        rel_freq: sa.Select[tuple[ReducedQuery, float, object, object]] = (
+            self._get_rel_freqs(db)
+        )
+        probs: sa.CTE = self._get_probs(rel_freq).cte()
+        fw_assoc: sa.Select[tuple[object, object, float]] = select(
             get_column(probs, "comp_1"),
             get_column(probs, "comp_2"),
             self._get_normalized_kld(
@@ -786,8 +782,8 @@ class Corpus:
                 (get_column(probs, "prob_no_2_1"), get_column(probs, "prob_no_2")),
             ).label("fw_assoc"),
         )
-        fw_assoc = fw_assoc.cte()
-        bw_assoc = select(
+        fw_cte: sa.CTE = fw_assoc.cte()
+        bw_assoc: sa.Select[tuple[object, object, float]] = select(
             get_column(probs, "comp_1"),
             get_column(probs, "comp_2"),
             self._get_normalized_kld(
@@ -795,27 +791,23 @@ class Corpus:
                 (get_column(probs, "prob_no_1_2"), get_column(probs, "prob_no_1")),
             ).label("bw_assoc"),
         )
-        bw_assoc = bw_assoc.cte()
+        bw_cte: sa.CTE = bw_assoc.cte()
 
         return (
             select(
                 ReducedQuery,
-                get_column(fw_assoc, "fw_assoc"),
-                get_column(bw_assoc, "bw_assoc"),
+                get_column(fw_cte, "fw_assoc"),
+                get_column(bw_cte, "bw_assoc"),
             )
             .join(
-                fw_assoc,
-                (get_column(fw_assoc, "comp_1") == get_column(ReducedQuery, "comp_1"))
-                & (
-                    get_column(fw_assoc, "comp_2") == get_column(ReducedQuery, "comp_2")
-                ),
+                fw_cte,
+                (get_column(fw_cte, "comp_1") == get_column(ReducedQuery, "comp_1"))
+                & (get_column(fw_cte, "comp_2") == get_column(ReducedQuery, "comp_2")),
             )
             .join(
-                bw_assoc,
-                (get_column(bw_assoc, "comp_1") == get_column(ReducedQuery, "comp_1"))
-                & (
-                    get_column(bw_assoc, "comp_2") == get_column(ReducedQuery, "comp_2")
-                ),
+                bw_cte,
+                (get_column(bw_cte, "comp_1") == get_column(ReducedQuery, "comp_1"))
+                & (get_column(bw_cte, "comp_2") == get_column(ReducedQuery, "comp_2")),
             )
         )
 
@@ -826,28 +818,32 @@ class Corpus:
         *,
         cf: bool = False,
     ) -> sa.Select[tuple[int, int, float, float]]:
-        id_columns = [get_column(db, "comp_1"), get_column(db, "comp_2")]
+        id_columns: list[sa.Column[object]]
+        id_columns = [
+            get_column(db, "comp_1"),
+            get_column(db, "comp_2"),
+        ]
         if cf:
             id_columns.append(get_column(db, "target"))
-        token_freq = select(
+        token_freq: sa.Select[tuple[object, ...]] = select(
             *id_columns,
             get_column(db, "freq"),
         ).where(get_column(db, column).in_(select(get_column(ReducedQuery, column))))
-        token_freq = token_freq.cte()
-        id_columns = [get_column(token_freq, column)]
+        token_freq_cte: sa.CTE = token_freq.cte()
+        id_columns = [get_column(token_freq_cte, column)]
         if cf:
-            id_columns.append(get_column(token_freq, "target"))
-        total_freq = select(
+            id_columns.append(get_column(token_freq_cte, "target"))
+        total_freq: sa.Select[tuple[object, ...]] = select(
             *id_columns,
             sa.func.sum(get_column(token_freq, "freq")).label("total_freq"),
         ).group_by(*id_columns)
-        total_freq = total_freq.cte()
+        total_freq_cte: sa.CTE = total_freq.cte()
         if cf:
             return select(
-                token_freq,
-                total_freq.c.total_freq,
+                token_freq_cte,
+                total_freq_cte.c.total_freq,
             ).join(
-                total_freq,
+                total_freq_cte,
                 (
                     (get_column(total_freq, column) == get_column(token_freq, column))
                     & (
@@ -857,10 +853,10 @@ class Corpus:
                 ),
             )
         return select(
-            token_freq,
-            total_freq.c.total_freq,
+            token_freq_cte,
+            total_freq_cte.c.total_freq,
         ).join(
-            total_freq,
+            total_freq_cte,
             (get_column(total_freq, column) == get_column(token_freq, column)),
         )
 
@@ -869,8 +865,8 @@ class Corpus:
         freqs: sa.ColumnElement[object],
         total_freqs: sa.ColumnElement[object],
     ) -> sa.ColumnElement[float]:
-        prob = freqs / total_freqs
-        info = sa.func.log2(prob)
+        prob = cast(sa.ColumnElement[float], freqs / total_freqs)
+        info = cast(sa.ColumnElement[float], sa.func.log2(prob))
         return prob * info
 
     def _compute_entropy(
@@ -880,33 +876,40 @@ class Corpus:
         *,
         cf: bool = False,
     ) -> sa.Select[tuple[int, float]] | sa.Select[tuple[int, int, float]]:
+        total_freq: sa.Select[tuple[int, int, float, float]]
         if cf:
             total_freq = self._get_total_freq(db, source_column, cf=True)
         else:
             total_freq = self._get_total_freq(db, source_column)
-        total_freq = total_freq.cte()
+        total_freq_cte: sa.CTE = total_freq.cte()
 
-        weighted_info = select(
-            total_freq,
+        weighted_info: sa.Select[tuple[int, int, float, float, float]] = select(
+            total_freq_cte,
             self._get_info(
                 get_column(total_freq, "freq"),
                 get_column(total_freq, "total_freq"),
             ).label("weighted_info"),
         )
-        weighted_info = weighted_info.cte()
-        wi_id_columns = [get_column(weighted_info, source_column)]
+        weighted_info_cte: sa.CTE = weighted_info.cte()
+        wi_id_columns: list[sa.Column[object]] = [
+            get_column(weighted_info_cte, source_column)
+        ]
         if cf:
-            wi_id_columns.append(get_column(weighted_info, "target"))
-        entropy = select(
+            wi_id_columns.append(get_column(weighted_info_cte, "target"))
+        entropy: sa.Select[tuple[object, ...]] = select(
             *wi_id_columns,
-            (-sa.func.sum(weighted_info.c.weighted_info)).label("raw_entropy"),
-            sa.func.count(weighted_info.c.weighted_info).label("n"),
+            (-sa.func.sum(get_column(weighted_info_cte, "weighted_info"))).label(
+                "raw_entropy"
+            ),
+            sa.func.count(get_column(weighted_info_cte, "weighted_info")).label("n"),
         ).group_by(*wi_id_columns)
-        entropy = entropy.cte()
+        entropy_cte: sa.CTE = entropy.cte()
 
-        ent_id_columns = [get_column(entropy, source_column)]
+        ent_id_columns: list[sa.Column[object]] = [
+            get_column(entropy_cte, source_column)
+        ]
         if cf:
-            ent_id_columns.append(get_column(entropy, "target"))
+            ent_id_columns.append(get_column(entropy_cte, "target"))
         return select(
             *ent_id_columns,
             (entropy.c.raw_entropy / sa.func.log2(entropy.c.n)).label("entropy"),
@@ -918,7 +921,7 @@ class Corpus:
         source_column: str,
         target_column: str,
     ) -> sa.Select[tuple[object, object, object, object]]:
-        mult_table = select(
+        mult_table: sa.Select[tuple[object, object, object, object]] = select(
             get_column(ReducedQuery, source_column).label(source_column),
             get_column(ReducedQuery, target_column).label("target"),
             get_column(db, target_column).label(target_column),
@@ -927,9 +930,10 @@ class Corpus:
             db,
             (get_column(ReducedQuery, source_column) == get_column(db, source_column)),
         )
-        mult_table = mult_table.cte()
-        return select(mult_table).where(
-            get_column(mult_table, "target") != get_column(mult_table, target_column),
+        mult_table_cte: sa.CTE = mult_table.cte()
+        return select(mult_table_cte).where(
+            get_column(mult_table_cte, "target")
+            != get_column(mult_table_cte, target_column),
         )
 
     def _get_entropy_diff(
@@ -939,14 +943,14 @@ class Corpus:
         source_column: str,
         target_column: str,
     ) -> sa.Select[tuple[object, object, float]]:
-        entropy_real_cte = entropy_real.cte()
-        entropy_cf_cte = entropy_cf.cte()
+        entropy_real_cte: sa.CTE = entropy_real.cte()
+        entropy_cf_cte: sa.CTE = entropy_cf.cte()
 
-        both_entropy = select(
+        both_entropy: sa.Select[tuple[object, object, object, object]] = select(
             get_column(entropy_cf_cte, source_column),
             get_column(entropy_cf_cte, "target").label(target_column),
-            entropy_real_cte.c.entropy.label("entropy_real"),
-            entropy_cf_cte.c.entropy.label("entropy_cf"),
+            get_column(entropy_real_cte, "entropy").label("entropy_real"),
+            get_column(entropy_cf_cte, "entropy").label("entropy_cf"),
         ).join(
             entropy_real_cte,
             (
@@ -954,13 +958,13 @@ class Corpus:
                 == get_column(entropy_real_cte, source_column)
             ),
         )
-        both_entropy = both_entropy.cte()
-        diff_column = get_column(both_entropy, "entropy_cf") - get_column(
-            both_entropy, "entropy_real"
+        both_entropy_cte: sa.CTE = both_entropy.cte()
+        diff_column = get_column(both_entropy_cte, "entropy_cf") - get_column(
+            both_entropy_cte, "entropy_real"
         )
         return select(
-            get_column(both_entropy, source_column),
-            get_column(both_entropy, target_column),
+            get_column(both_entropy_cte, source_column),
+            get_column(both_entropy_cte, target_column),
             diff_column.label("entropy_diff"),
         )
 
@@ -970,43 +974,52 @@ class Corpus:
         source_column: str,
         target_column: str,
     ) -> sa.Select[tuple[object, object, float]]:
-        mult_table = self._get_mult_table(
-            db,
-            source_column,
-            target_column,
+        mult_table: sa.Select[tuple[object, object, object, object]] = (
+            self._get_mult_table(
+                db,
+                source_column,
+                target_column,
+            )
         )
-        mult_table = mult_table.cte()
-        entropy_real = self._compute_entropy(db, source_column)
-        entropy_real = cast(sa.Select[tuple[int, float]], entropy_real)
-        entropy_cf = self._compute_entropy(
-            mult_table,
-            source_column,
-            cf=True,
+        mult_table_cte: sa.CTE = mult_table.cte()
+        entropy_real = cast(
+            sa.Select[tuple[int, float]], self._compute_entropy(db, source_column)
         )
-        entropy_cf = cast(sa.Select[tuple[int, int, float]], entropy_cf)
+        entropy_cf = cast(
+            sa.Select[tuple[int, int, float]],
+            self._compute_entropy(
+                mult_table_cte,
+                source_column,
+                cf=True,
+            ),
+        )
         return self._get_entropy_diff(
             entropy_real, entropy_cf, source_column, target_column
         )
 
     def _get_entropies(self) -> sa.Select[tuple[ReducedQuery, object, object]]:
-        db = self._filtered_db
-        entropy_1 = self._get_entropy(db, "comp_2", "comp_1")
-        entropy_1 = entropy_1.cte()
-        entropy_2 = self._get_entropy(db, "comp_1", "comp_2")
-        entropy_2 = entropy_2.cte()
+        db: type[orm.DeclarativeBase] = self._filtered_db
+        entropy_1: sa.Select[tuple[object, object, float]] = self._get_entropy(
+            db, "comp_2", "comp_1"
+        )
+        entropy_1_cte: sa.CTE = entropy_1.cte()
+        entropy_2: sa.Select[tuple[object, object, float]] = self._get_entropy(
+            db, "comp_1", "comp_2"
+        )
+        entropy_2_cte: sa.CTE = entropy_2.cte()
         return (
             select(
                 ReducedQuery,
-                get_column(entropy_1, "entropy_diff").label("entropy_1"),
-                get_column(entropy_2, "entropy_diff").label("entropy_2"),
+                get_column(entropy_1_cte, "entropy_diff").label("entropy_1"),
+                get_column(entropy_2_cte, "entropy_diff").label("entropy_2"),
             )
             .join(
-                entropy_1,
+                entropy_1_cte,
                 (ReducedQuery.comp_1 == get_column(entropy_1, "comp_1"))
                 & (ReducedQuery.comp_2 == get_column(entropy_1, "comp_2")),
             )
             .join(
-                entropy_2,
+                entropy_2_cte,
                 (ReducedQuery.comp_1 == get_column(entropy_2, "comp_1"))
                 & (ReducedQuery.comp_2 == get_column(entropy_2, "comp_2")),
             )
@@ -1024,22 +1037,20 @@ class Corpus:
         """
         results_cte: list[sa.CTE] = [result.cte() for result in ngram_query.results]
 
-        all_results = select(ReducedQuery).cte()
-
         for result in results_cte:
-            measure_columns = [
-                column
+            measure_columns: list[sa.ColumnElement[float]] = [
+                cast(sa.ColumnElement[float], column)
                 for column in result.c
                 if cast(str, column.name) not in ["comp_1", "comp_2", "id"]
             ]
-            all_results = select(all_results, *measure_columns).join(
+            all_results: sa.Select[RESULTS_ROW_STRUCT] = select(
+                ReducedQuery, *measure_columns
+            ).join(
                 result,
-                (get_column(all_results, "comp_1") == get_column(result, "comp_1"))
-                & (get_column(all_results, "comp_2") == get_column(result, "comp_2")),
+                (get_column(ReducedQuery, "comp_1") == get_column(result, "comp_1"))
+                & (get_column(ReducedQuery, "comp_2") == get_column(result, "comp_2")),
             )
-            all_results = all_results.cte()
-
-        return all_results
+            return all_results.cte()
 
     def _get_all_scores(self, ngram_query: NgramQuery) -> sa.CTE:
         """Allocate all measures for the ngrams in the query table"""
@@ -1076,15 +1087,18 @@ class Corpus:
                 # TODO: Better status info
                 with console.status("[bold red]Executing...", spinner="pong") as status:
                     self._create_query(ngram_query)
-                    all_scores = self._get_all_scores(ngram_query)
+                    all_scores: sa.CTE = self._get_all_scores(ngram_query)
                     results = conn.execute(select(all_scores)).fetchall()
                     status.update("[bold green]Done!")
             else:
                 self._create_query(ngram_query)
                 all_scores = self._get_all_scores(ngram_query)
-                results = conn.execute(select(all_scores)).fetchall()
+                results = cast(
+                    list[Row[RESULTS_ROW_STRUCT]],
+                    conn.execute(select(all_scores)).fetchall(),
+                )
         if len(results) > 0:
-            results_df = pd.DataFrame(results)
+            results_df: pd.DataFrame = pd.DataFrame(results)
             return results_df.astype(
                 {
                     "id": "int64",
