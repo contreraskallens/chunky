@@ -26,3 +26,6 @@ dev = [
   "pytest>=8.4.2",
   "statsmodels>=0.14.5",
 ]
+
+[tool.basedpyright]
+reportMissingTypeStubs = false

@@ -19,7 +19,7 @@ from nltk import everygrams  # pyright: ignore[reportUnknownVariableType]
 
 from chunky.corpus import Corpus, NgramQuery
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 DEFAULT_WEIGHTS: list[float] = [
     1 / 8,
@@ -194,33 +194,35 @@ class Fetcher:
             tuple: A tuple containing the lists of bigrams, trigrams, and fourgrams.
 
         """
-        # WARN: Currently and for the foreseeable future supports lengths of up to n=4.
+        # NOTE: Currently and for the foreseeable future supports lengths of up to n=4.
 
-        bigrams: list[list[str]] = []
-        trigrams: list[list[str]] = []
-        fourgrams: list[list[str]] = []
+        bigrams: list[tuple[str, ...]] = []
+        trigrams: list[tuple[str, ...]] = []
+        fourgrams: list[tuple[str, ...]] = []
         for ngram in all_ngrams:
             split_ngram = ngram.split()
             len_ngram = len(split_ngram)
             if len_ngram >= BIGRAM_LEN:
-                bigrams.append([split_ngram[0], split_ngram[1]])
+                bigrams.append((split_ngram[0], split_ngram[1]))
             if len_ngram >= TRIGRAM_LEN:
                 trigrams.append(
-                    [f"{split_ngram[0]} {split_ngram[1]}", split_ngram[2]],
+                    (f"{split_ngram[0]} {split_ngram[1]}", split_ngram[2]),
                 )
             if len_ngram >= FOURGRAM_LEN:
                 fourgrams.append(
-                    [
+                    (
                         f"{split_ngram[0]} {split_ngram[1]} {split_ngram[2]}",
                         split_ngram[3],
-                    ],
+                    ),
                 )
             if len_ngram not in [BIGRAM_LEN, TRIGRAM_LEN, FOURGRAM_LEN]:
                 except_msg = "Length of ngram not supported"
                 raise NotImplementedError(except_msg)
-        unique_bigrams: list[list[str]] = [bigram for bigram in set(bigrams)]
-        unique_trigrams: list[list[str]] = [trigram for trigram in set(trigrams)]
-        unique_fourgrams: list[list[str]] = [fourgram for fourgram in set(fourgrams)]
+        unique_bigrams: list[list[str]] = [list(bigram) for bigram in set(bigrams)]
+        unique_trigrams: list[list[str]] = [list(trigram) for trigram in set(trigrams)]
+        unique_fourgrams: list[list[str]] = [
+            list(fourgram) for fourgram in set(fourgrams)
+        ]
         return unique_bigrams, unique_trigrams, unique_fourgrams
 
     def _make_scores_ngrams(self, ngrams: list[str], *, verbose: bool = False) -> None:

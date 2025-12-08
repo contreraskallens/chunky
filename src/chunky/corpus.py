@@ -9,12 +9,12 @@ import logging
 import time
 from dataclasses import dataclass
 from functools import reduce
-from typing import cast, TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import duckdb
 import pandas as pd
-from rich.console import Console
 import sqlalchemy as sa
+from rich.console import Console
 from sqlalchemy import orm
 from sqlalchemy.sql import select
 
@@ -29,9 +29,9 @@ from .create_corpus import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-VALID_COLUMNS = ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
+VALID_COLUMNS: list[str] = ["ug_1", "ug_2", "ug_3", "ug_4", "big_1", "trig_1"]
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class Base(orm.DeclarativeBase):
@@ -322,7 +322,7 @@ class Corpus:
             msg = "Problem with corpus information. Please initialize again"
             raise ValueError(msg)
         ngram_db_query = f"SELECT * FROM '{self._ngram_db}' LIMIT {limit}"  # noqa: S608
-        ngram_data = pd.read_sql_query(
+        ngram_data = pd.read_sql_query(  # pyright: ignore[reportUnknownMemberType]
             ngram_db_query,
             self._engine,
         )
