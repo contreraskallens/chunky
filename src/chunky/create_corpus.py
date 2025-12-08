@@ -12,7 +12,7 @@ import pandas as pd
 ALLOWED_CORPORA = ["coca", "coca_sample", "bnc", "test"]
 TEMP_DIR = Path("chunky/db/temp")
 CORPUS_DIR = Path("chunky/db")
-DEFAULT_CONFIG = {"memory_limit": 20, "cpu_cores": None}
+DEFAULT_CONFIG: dict[str, str | int | None] = {"memory_limit": 20, "cpu_cores": None}
 
 
 def validate_corpus_name(name: str) -> bool:
@@ -43,7 +43,7 @@ def is_valid_identifier(name: str) -> bool:
 
 def _config_env(
     conn: duckdb.DuckDBPyConnection,
-    env_config: dict = DEFAULT_CONFIG,
+    env_config: dict[str, str | int | None] = DEFAULT_CONFIG,
 ) -> None:
     memory_limit = env_config.get("memory_limit")
     cores = env_config.get("cpu_cores")
@@ -54,14 +54,14 @@ def _config_env(
         cpu_count = cpu_count - 1
     else:
         cpu_count = 1
-    conn.execute(f"SET threads TO {cpu_count}")
-    conn.execute(f"SET memory_limit='{memory_limit}GB'")
+    _ = conn.execute(f"SET threads TO {cpu_count}")
+    _ = conn.execute(f"SET memory_limit='{memory_limit}GB'")
 
 
 def init_corpus(path: Path) -> None:
     """Initialize the corpus for first-time use."""
     with duckdb.connect(path) as conn:
-        conn.execute("""
+        _ = conn.execute("""
             CREATE TABLE ngram_db_temp
             (
                 corpus TEXT,
@@ -74,7 +74,7 @@ def init_corpus(path: Path) -> None:
                 freq INTEGER
             )
         """)
-        conn.execute("""
+        _ = conn.execute("""
             CREATE TABLE unigram_db_temp
             (
                 corpus TEXT,
@@ -116,9 +116,9 @@ def add_chunk(path: Path, ngrams: dict) -> None:
     """
     chunk_unigrams, chunk_ngrams = _get_chunk_dfs(ngrams)
     with duckdb.connect(path) as conn:
-        conn.register("unigram_df", chunk_unigrams)
-        conn.register("ngram_df", chunk_ngrams)
-        conn.execute("""
+        _ = conn.register("unigram_df", chunk_unigrams)
+        _ = conn.register("ngram_df", chunk_ngrams)
+        _ = conn.execute("""
             CREATE OR REPLACE TEMPORARY TABLE chunk_unigrams AS
             (
                 SELECT
@@ -130,7 +130,7 @@ def add_chunk(path: Path, ngrams: dict) -> None:
                     unigram_df
             )
         """)
-        conn.execute("""
+        _ = conn.execute("""
             CREATE OR REPLACE TEMPORARY TABLE chunk_ngrams AS
             (
                 SELECT
@@ -146,7 +146,7 @@ def add_chunk(path: Path, ngrams: dict) -> None:
                     ngram_df
             )
         """)
-        conn.execute("""
+        _ = conn.execute("""
             INSERT INTO
                 ngram_db_temp
             SELECT
@@ -154,7 +154,7 @@ def add_chunk(path: Path, ngrams: dict) -> None:
             FROM
                 chunk_ngrams
         """)
-        conn.execute("""
+        _ = conn.execute("""
             INSERT INTO
                 unigram_db_temp
             SELECT
@@ -207,11 +207,11 @@ def _pivot_tables(conn: duckdb.DuckDBPyConnection, valid_corpora: list[str]) -> 
         PIVOT(SUM(freq) FOR corpus IN ({corpora_query}))
     )
     """  # noqa: S608 Insert was validated
-    conn.execute(pivot_unigram_q)
-    conn.execute(pivot_ngram_q)
-    conn.execute("DROP TABLE unigram_db_temp")
-    conn.execute("DROP TABLE ngram_db_temp")
-    conn.execute("VACUUM ANALYZE")
+    _ = conn.execute(pivot_unigram_q)
+    _ = conn.execute(pivot_ngram_q)
+    _ = conn.execute("DROP TABLE unigram_db_temp")
+    _ = conn.execute("DROP TABLE ngram_db_temp")
+    _ = conn.execute("VACUUM ANALYZE")
 
 
 def _coalesce_corpus(conn: duckdb.DuckDBPyConnection) -> None:
@@ -247,8 +247,8 @@ def _coalesce_corpus(conn: duckdb.DuckDBPyConnection) -> None:
                 unigram_db
             )
         """
-    conn.execute(coalesce_ngrams)
-    conn.execute(coalesce_unigrams)
+    _ = conn.execute(coalesce_ngrams)
+    _ = conn.execute(coalesce_unigrams)
     temp_read.unlink()
 
 
@@ -286,8 +286,8 @@ def _make_freqs(conn: duckdb.DuckDBPyConnection) -> None:
                 FROM unigram_db
             )
         """
-    conn.execute(ngram_freq)
-    conn.execute(unigram_freq)
+    _ = conn.execute(ngram_freq)
+    _ = conn.execute(unigram_freq)
 
     temp_read.unlink()
 
@@ -336,8 +336,8 @@ def _sum_freqs(conn: duckdb.DuckDBPyConnection, valid_corpora: list) -> None:
                 ug_hash
         )
             """  # noqa: S608 Corpus names are validated
-    conn.execute(ngram_sum)
-    conn.execute(unigram_sum)
+    _ = conn.execute(ngram_sum)
+    _ = conn.execute(unigram_sum)
     temp_read.unlink()
 
 
@@ -397,15 +397,15 @@ def _finalize_corpus(
             BLOOM_FILTER_FALSE_POSITIVE_RATIO 0.01
         )
         """  # noqa: S608 Already validated
-    conn.execute(unigram_finalize, [threshold])
-    conn.execute(ngram_finalize, [threshold])
-    conn.execute("VACUUM ANALYZE")
+    _ = conn.execute(unigram_finalize, [threshold])
+    _ = conn.execute(ngram_finalize, [threshold])
+    _ = conn.execute("VACUUM ANALYZE")
     temp_read.unlink()
 
 
 def _create_totals(conn: duckdb.DuckDBPyConnection) -> None:
     """Create a table with the proportions of each corpus from total counts."""
-    conn.execute(
+    _ = conn.execute(
         """
         CREATE OR REPLACE TABLE corpus_proportions AS (
             SELECT
@@ -416,14 +416,14 @@ def _create_totals(conn: duckdb.DuckDBPyConnection) -> None:
         )
     """,
     )
-    conn.execute("ALTER TABLE corpus_proportions ADD PRIMARY KEY (id)")
+    _ = conn.execute("ALTER TABLE corpus_proportions ADD PRIMARY KEY (id)")
 
 
 def consolidate_corpus(
     path: Path,
     corpus_name: str = "test",
     threshold: int = 2,
-    env_config: dict = DEFAULT_CONFIG,
+    env_config: dict[str, str | int | None] = DEFAULT_CONFIG,
 ) -> None:
     """Consolidate the temporary tables into the total ones.
 

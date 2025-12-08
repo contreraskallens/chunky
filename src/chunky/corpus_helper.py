@@ -6,22 +6,22 @@
 # TODO: make method for large batches and for specific measures.
 # TODO: Check that weights sum 1
 # TODO: test for corpora other than CoCA
-# TODO: Return dataclass instead of tuples and dictionaries 
+# TODO: Return dataclass instead of tuples and dictionaries
 
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import numpy as np
 import pandas as pd
-from nltk import everygrams
-from typing import cast
+from nltk import everygrams  # pyright: ignore[reportUnknownVariableType]
 
 from chunky.corpus import Corpus, NgramQuery
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WEIGHTS = [
+DEFAULT_WEIGHTS: list[float] = [
     1 / 8,
     1 / 8,
     1 / 8,
@@ -31,7 +31,7 @@ DEFAULT_WEIGHTS = [
     1 / 8,
     1 / 8,
 ]
-VARIABLE_NAMES = [
+VARIABLE_NAMES: list[str] = [
     "token_freq",
     "dispersion",
     "typef_1",
@@ -41,9 +41,38 @@ VARIABLE_NAMES = [
     "fw_assoc",
     "bw_assoc",
 ]
-BIGRAM_LEN = 2
-TRIGRAM_LEN = 3
-FOURGRAM_LEN = 4
+BIGRAM_LEN: int = 2
+TRIGRAM_LEN: int = 3
+FOURGRAM_LEN: int = 4
+
+
+def min_max(column: pd.Series) -> pd.Series:
+    """Min-max normalize a column of a dataframe.
+
+    Take the column of a pandas DataFrame and normalize it
+    by substracting the minimum value from each value and dividing them
+    by the difference between the maximum and the minimum.
+
+    Args:
+        column (pd.Series): The column of a dataframe to normalize.
+
+    Returns:
+        pd.Series: A pandas Series containing the min-max normalized
+        values of the original column.
+
+    """
+    min_value: float = cast(float, column.min())
+    max_value: float = cast(float, column.max())
+    column_norm = column - min_value
+    return column_norm.div(max_value - min_value)
+
+
+def get_and_join_ngrams(line: str) -> list[str]:
+    split_line: list[str] = line.split()
+    ngrams: list[tuple[str, ...]] = cast(
+        list[tuple[str, ...]], list(everygrams(split_line, 2, 4))
+    )
+    return [" ".join(ngram) for ngram in ngrams]
 
 
 class Fetcher:
@@ -59,7 +88,7 @@ class Fetcher:
 
     """
 
-    def __init__(self, corpus: Corpus | str) -> None:
+    def __init__(self, corpus: str) -> None:
         """Initialize the Corpus Helper class.
 
         Initializes an instance of the Corpus Helper Class.
@@ -84,15 +113,15 @@ class Fetcher:
 
         """
         logger.debug("Initializing helper for corpus %s", corpus)
-        if isinstance(corpus, str):
-            self.corpus = Corpus(str(corpus))
-        else:
-            self.corpus = corpus
+        self.corpus: Corpus = Corpus(str(corpus))
+        self._bigram_scores = pd.DataFrame()
+        self._trigram_scores = pd.DataFrame()
+        self._fourgram_scores = pd.DataFrame()
 
     def __call__(
         self,
         query: str,
-    ) -> list:
+    ) -> list[tuple[object]]:
         """Query the corpus.
 
         Directly queries the corpus with the specified string.
@@ -109,7 +138,7 @@ class Fetcher:
     def df(
         self,
         query: str,
-        params: list | dict | None,
+        params: list[str | int | float] | dict[str, str | int | float] | None = None,
     ) -> pd.DataFrame:
         """Query the corpus for a dataframe.
 
@@ -143,9 +172,11 @@ class Fetcher:
             pd.DataFrame: Dataframe containing the ngram table from the corpus.
 
         """
-        return self.corpus._show_ngrams(limit=limit)
+        return self.corpus.show_ngrams(limit=limit)
 
-    def _split_ngrams(self, all_ngrams: list[str]) -> tuple:
+    def _split_ngrams(
+        self, all_ngrams: list[str]
+    ) -> tuple[list[list[str]], list[list[str]], list[list[str]]]:
         """Split and sort ngrams according to length.
 
         Take a list of ngrams represented as strings "take the"
@@ -155,7 +186,6 @@ class Fetcher:
         "take the other way", generate all subcomponents: ["take", "the"],
         ["take the", "other"], and ["take the other", "way"].
 
-        # !Currently and for the foreseeable future supports lengths of up to n=4.
 
         Args:
             all_ngrams (list[str]): List with all ngrams to be split and sorted.
@@ -164,37 +194,36 @@ class Fetcher:
             tuple: A tuple containing the lists of bigrams, trigrams, and fourgrams.
 
         """
-        bigrams = []
-        trigrams = []
-        fourgrams = []
+        # WARN: Currently and for the foreseeable future supports lengths of up to n=4.
+
+        bigrams: list[list[str]] = []
+        trigrams: list[list[str]] = []
+        fourgrams: list[list[str]] = []
         for ngram in all_ngrams:
             split_ngram = ngram.split()
             len_ngram = len(split_ngram)
             if len_ngram >= BIGRAM_LEN:
-                bigrams.append((split_ngram[0], split_ngram[1]))
+                bigrams.append([split_ngram[0], split_ngram[1]])
             if len_ngram >= TRIGRAM_LEN:
                 trigrams.append(
-                    (
-                        f"{split_ngram[0]} {split_ngram[1]}",
-                        split_ngram[2],
-                    ),
+                    [f"{split_ngram[0]} {split_ngram[1]}", split_ngram[2]],
                 )
             if len_ngram >= FOURGRAM_LEN:
                 fourgrams.append(
-                    (
+                    [
                         f"{split_ngram[0]} {split_ngram[1]} {split_ngram[2]}",
                         split_ngram[3],
-                    ),
+                    ],
                 )
             if len_ngram not in [BIGRAM_LEN, TRIGRAM_LEN, FOURGRAM_LEN]:
                 except_msg = "Length of ngram not supported"
                 raise NotImplementedError(except_msg)
-        bigrams = [list(bigram) for bigram in set(bigrams)]
-        trigrams = [list(trigram) for trigram in set(trigrams)]
-        fourgrams = [list(fourgram) for fourgram in set(fourgrams)]
-        return bigrams, trigrams, fourgrams
+        unique_bigrams: list[list[str]] = [bigram for bigram in set(bigrams)]
+        unique_trigrams: list[list[str]] = [trigram for trigram in set(trigrams)]
+        unique_fourgrams: list[list[str]] = [fourgram for fourgram in set(fourgrams)]
+        return unique_bigrams, unique_trigrams, unique_fourgrams
 
-    def _make_scores_ngrams(self, ngrams: list[str], *, verbose=False) -> None:
+    def _make_scores_ngrams(self, ngrams: list[str], *, verbose: bool = False) -> None:
         """Allocate scores for all provided ngrams.
 
         Queries the corpus for the provided ngrams and obtains the
@@ -205,14 +234,20 @@ class Fetcher:
             ngrams (list[str]): List of ngrams for which scores will be allocated.
 
         """
-        ngrams = list(set(ngrams))
-        bigrams, trigrams, fourgrams = self._split_ngrams(ngrams)
-        bigram_query = NgramQuery(bigrams, "ug_1", "ug_2", 2)
-        trigram_query = NgramQuery(trigrams, "big_1", "ug_3", 3)
-        fourgram_query = NgramQuery(fourgrams, "trig_1", "ug_4", 4)
-        self._bigram_scores = self.corpus.get_scores(bigram_query, verbose=verbose)
-        self._trigram_scores = self.corpus.get_scores(trigram_query, verbose=verbose)
-        self._fourgram_scores = self.corpus.get_scores(fourgram_query, verbose=verbose)
+        unique_ngrams: list[str] = list(set(ngrams))
+        bigrams, trigrams, fourgrams = self._split_ngrams(unique_ngrams)
+        bigram_query: NgramQuery = NgramQuery(bigrams, "ug_1", "ug_2", 2)
+        trigram_query: NgramQuery = NgramQuery(trigrams, "big_1", "ug_3", 3)
+        fourgram_query: NgramQuery = NgramQuery(fourgrams, "trig_1", "ug_4", 4)
+        self._bigram_scores: pd.DataFrame = self.corpus.get_scores(
+            bigram_query, verbose=verbose
+        )
+        self._trigram_scores: pd.DataFrame = self.corpus.get_scores(
+            trigram_query, verbose=verbose
+        )
+        self._fourgram_scores: pd.DataFrame = self.corpus.get_scores(
+            fourgram_query, verbose=verbose
+        )
 
     def _process_text(
         self,
@@ -247,12 +282,7 @@ class Fetcher:
         this_text = this_text.str.replace(r"\W+$", " ", regex=True)
         this_text = this_text.str.replace(r"(\w)[\.,]+(\w)", r"\1 \2", regex=True)
         this_text = this_text.str.replace(r"\s+", " ", regex=True)
-        all_ngrams = this_text.apply(
-            lambda line: [
-                " ".join(ngram)  # type: ignore[attr-defined]
-                for ngram in everygrams(line.split(), 2, 4)
-            ],
-        )
+        all_ngrams: pd.Series[list[str]] = this_text.apply(get_and_join_ngrams)  # pyright: ignore[reportUnknownMemberType]
         return [ngram for line in all_ngrams.to_list() for ngram in line]
 
     def _get_ngrams_text(
@@ -273,34 +303,11 @@ class Fetcher:
         """
         ngrams = self._process_text(text=text, **kwargs)
         return ngrams
-        # self._make_scores_ngrams(
-        # ngrams=ngrams,
-        # )
-
-    def _min_max(self, column: pd.Series) -> pd.Series:
-        """Min-max normalize a column of a dataframe.
-
-        Take the column of a pandas DataFrame and normalize it
-        by substracting the minimum value from each value and dividing them
-        by the difference between the maximum and the minimum.
-
-        Args:
-            column (pd.Series): The column of a dataframe to normalize.
-
-        Returns:
-            pd.Series: A pandas Series containing the min-max normalized
-            values of the original column.
-
-        """
-        min_value = column.min()
-        max_value = column.max()
-        column_norm = column - min_value
-        return column_norm.div(max_value - min_value)
 
     def _normalize_results(
         self,
         results: pd.DataFrame,
-        entropy_limits: list | None = None,
+        entropy_limits: list[float] | None = None,
     ) -> pd.DataFrame:
         """Apply the respective normalization to each measure.
 
@@ -325,55 +332,38 @@ class Fetcher:
         norm_no_data = normalized_results[normalized_results.isna().any(axis=1)]
         if len(norm_no_data) > 0:
             norm_no_data = norm_no_data.loc[:, ["comp_1", "comp_2"]]
-            norm_no_data = norm_no_data.fillna(pd.NA)
+            norm_no_data = norm_no_data.fillna(pd.NA)  # pyright: ignore[reportUnknownMemberType]
         normalized_results = normalized_results[normalized_results.notna().all(axis=1)]
-        normalized_results.loc[:, ["token_freq", "typef_1", "typef_2"]] = (
-            normalized_results.loc[:, ["token_freq", "typef_1", "typef_2"]].apply(
-                lambda x: np.log(x)
-            )
+        norm_cols = ["token_freq", "typef_1", "typef_2"]
+        normalized_results.loc[:, norm_cols] = np.log(
+            normalized_results.loc[:, norm_cols]
         )
 
         normalized_results.loc[:, "entropy_1"] = normalized_results.loc[
             :, "entropy_1"
-        ].apply(
-            lambda x: max(entropy_limits[0], x),
-        )
+        ].clip(lower=entropy_limits[0], upper=entropy_limits[1])
+        normalized_results.loc[:, "entropy_2"] = normalized_results.loc[
+            :, "entropy_2"
+        ].clip(lower=entropy_limits[0], upper=entropy_limits[1])
 
-        normalized_results.loc[:, "entropy_2"] = normalized_results.loc[
-            :, "entropy_2"
-        ].apply(
-            lambda x: max(entropy_limits[0], x),
-        )
-        normalized_results.loc[:, "entropy_1"] = normalized_results.loc[
-            :, "entropy_1"
-        ].apply(
-            lambda x: min(entropy_limits[1], x),
-        )
-        normalized_results.loc[:, "entropy_2"] = normalized_results.loc[
-            :, "entropy_2"
-        ].apply(
-            lambda x: min(entropy_limits[1], x),
-        )
         normalized_results.loc[
             :, ["token_freq", "typef_1", "typef_2", "entropy_1", "entropy_2"]
         ] = normalized_results.loc[
             :, ["token_freq", "typef_1", "typef_2", "entropy_1", "entropy_2"]
-        ].apply(lambda x: self._min_max(x))
+        ].apply(min_max)
 
         normalized_results.loc[:, ["dispersion", "typef_1", "typef_2"]] = (
-            normalized_results.loc[:, ["dispersion", "typef_1", "typef_2"]].apply(
-                lambda x: 1 - x
-            )
+            1 - normalized_results.loc[:, ["dispersion", "typef_1", "typef_2"]]
         )
         if len(norm_no_data) > 0:
-            return cast(pd.DataFrame, pd.concat([normalized_results, norm_no_data]))
+            return pd.concat([normalized_results, norm_no_data])
         else:
-            return cast(pd.DataFrame, normalized_results)
+            return normalized_results
 
     def _weight_results(
         self,
         mwu_measures: pd.DataFrame,
-        weights: list[float] | dict = DEFAULT_WEIGHTS,
+        weights: list[float] | dict[str, float] = DEFAULT_WEIGHTS,
     ) -> pd.DataFrame:
         """Apply weighting scheme to normalized measures.
 
@@ -407,7 +397,7 @@ class Fetcher:
     def _compute_mwu(
         self,
         mwu_measures: pd.DataFrame,
-        weights: list | dict = DEFAULT_WEIGHTS,
+        weights: list[float] | dict[str, float] = DEFAULT_WEIGHTS,
     ) -> pd.Series:
         """Obtain the MWU score given normalized measures.
 
@@ -428,7 +418,7 @@ class Fetcher:
     def _normalize_and_compute(
         self,
         results: pd.DataFrame,
-        weights: list | dict = DEFAULT_WEIGHTS,
+        weights: list[float] | dict[str, float] = DEFAULT_WEIGHTS,
     ) -> pd.DataFrame:
         """Normalize raw measures and compute the MWU score.
 
@@ -449,13 +439,13 @@ class Fetcher:
 
     def get_mwu_scores(
         self,
-        ngrams: str | list,
-        weights: list | dict = DEFAULT_WEIGHTS,
+        ngrams: str | list[str],
+        weights: list[float] | dict[str, float] = DEFAULT_WEIGHTS,
         mode: str = "normalized",
         *,
-        verbose=False,
+        verbose: bool = False,
         **kwargs: str,
-    ) -> dict:
+    ) -> dict[str, pd.DataFrame | None]:
         r"""Obtain MWU measures and score for the provided input.
 
         Take a chunk of text or ngrams and obtain all MWU measures for them, including
@@ -492,7 +482,7 @@ class Fetcher:
         if isinstance(ngrams, str):
             ngrams = ngrams.lower()
             ngrams = self._get_ngrams_text(str(ngrams), **kwargs)
-        elif isinstance(ngrams, list):
+        else:
             ngrams = [ngram.lower() for ngram in ngrams]
             ngrams = list(ngrams)
         self._make_scores_ngrams(list(ngrams), verbose=verbose)
