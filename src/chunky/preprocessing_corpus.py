@@ -291,7 +291,7 @@ def preprocess_corpus(
     corpus: str,
     raw_lines: str | list[str] | None = None,
     corpus_id: str | None = None,
-) -> dict:
+) -> dict[str, list[tuple[object, ...]]]:
     """Clean corpus and extract ngram frequencies from it.
 
     Args:

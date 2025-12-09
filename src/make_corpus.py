@@ -1,9 +1,5 @@
 import chunky
 
-my_corpus = chunky.Corpus(
-    "coca",
-    make=True,
-    corpus_dir="chunky/corpora/coca_texts/",
-    chunk_size=10,
-    threshold=1,
+chunky.make_processed_corpus(
+    corpus_name="coca_sample", threshold=2, corpus_dir="chunky/corpora/coca_sample"
 )

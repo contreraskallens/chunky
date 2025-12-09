@@ -41,12 +41,12 @@ VARIABLE_NAMES: list[str] = [
     "fw_assoc",
     "bw_assoc",
 ]
-BIGRAM_LEN = 2
-TRIGRAM_LEN = 3
-FOURGRAM_LEN = 4
+BIGRAM_LEN: int = 2
+TRIGRAM_LEN: int = 3
+FOURGRAM_LEN: int = 4
 
 
-def min_max(column: pd.Series) -> pd.Series[float]:
+def min_max(column: pd.Series[float]) -> pd.Series[float]:
     """Min-max normalize a column of a dataframe.
 
     Take the column of a pandas DataFrame and normalize it
@@ -61,9 +61,9 @@ def min_max(column: pd.Series) -> pd.Series[float]:
         values of the original column.
 
     """
-    min_value = cast(float, column.min())
-    max_value = cast(float, column.max())
-    column_norm = cast(pd.Series[float], column - min_value)
+    min_value = column.min()
+    max_value = column.max()
+    column_norm: pd.Series[float] = column - min_value
     return column_norm.div(max_value - min_value)
 
 

@@ -91,10 +91,10 @@ def init_corpus(path: Path) -> None:
 
 
 def _get_chunk_dfs(
-    ngrams: dict[str, tuple[object, ...]],
+    ngrams: dict[str, list[tuple[object, ...]]],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    chunk_unigrams = cast(tuple[str, str, int], ngrams["unigrams"])
-    chunk_ngrams = cast(tuple[str, str, str, str, int], ngrams["fourgrams"])
+    chunk_unigrams = cast(list[tuple[str, str, int]], ngrams["unigrams"])
+    chunk_ngrams = cast(list[tuple[str, str, str, str, int]], ngrams["fourgrams"])
 
     chunk_unigrams_df: pd.DataFrame = pd.DataFrame(
         chunk_unigrams, columns=pd.Index(["corpus", "ug", "freq"])
@@ -110,7 +110,7 @@ def _get_chunk_dfs(
     return chunk_unigrams_df, chunk_ngrams_df
 
 
-def add_chunk(path: Path, ngrams: dict[str, tuple[object, ...]]) -> None:
+def add_chunk(path: Path, ngrams: dict[str, list[tuple[object, ...]]]) -> None:
     """Add ngram to the corpus.
 
     For use during allocation of ngram table. Takes unigram and

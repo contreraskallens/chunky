@@ -4,19 +4,20 @@
 
 from __future__ import annotations
 
+from functools import reduce
 import logging
 import re
 import string
-from itertools import groupby
+from itertools import groupby, batched
 from pathlib import Path
 
 from . import create_corpus as create
 from . import preprocessing_corpus as preprocess
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 
-def _process_test() -> dict:
+def _process_test() -> dict[str, list[tuple[object, ...]]]:
     """Build the test corpus.
 
     Processes the test corpus from Gries' original publication and
@@ -51,19 +52,32 @@ def _process_bnc(
     with corpus_dir.open(encoding="utf-8") as corpus_file:
         i = 0
         while True:
-            raw_lines = corpus_file.readlines(chunk_size)
+            raw_lines: list[str] = corpus_file.readlines(chunk_size)
             if not raw_lines:
                 break
-            ngram_dicts = preprocess.preprocess_corpus(
-                corpus="bnc",
-                raw_lines=raw_lines,
+            ngram_dicts: dict[str, list[tuple[object, ...]]] = (
+                preprocess.preprocess_corpus(
+                    corpus="bnc",
+                    raw_lines=raw_lines,
+                )
             )
             create.add_chunk(path=corpus_path, ngrams=ngram_dicts)
             i += len(raw_lines)
             logger.debug("%s lines processed", i)
 
 
-def _prepare_coca(corpus_dir: Path) -> tuple:
+def _capture_coca_cat(file_path: Path) -> str:
+    matching = re.search(r"(?<=text_).+(?=_\d+\.txt)", str(file_path), re.IGNORECASE)
+    if matching is None:
+        msg = f"File '{file_path}' is not a coca file. Ensure that files have names in the format 'text_(category)_year.txt"
+        raise ValueError(msg)
+    else:
+        return matching.group()
+
+
+def _prepare_coca(
+    corpus_dir: Path,
+) -> tuple[dict[str, str], list[tuple[str, list[Path]]]]:
     """Prepare the files in the CoCA directory.
 
     Take the files int he CoCA directory and build a catalog with them
@@ -79,33 +93,28 @@ def _prepare_coca(corpus_dir: Path) -> tuple:
 
     """
     coca_texts = sorted(corpus_dir.iterdir())
-    coca_cats = [
-        re.search(r"_.+_", str(text_name), re.IGNORECASE) for text_name in coca_texts
-    ]
-    coca_cats = [text_name.group(0) for text_name in coca_cats if text_name is not None]
+    coca_cats: list[str] = [_capture_coca_cat(text_name) for text_name in coca_texts]
     coca_cats = list(set(coca_cats))
-    corpus_ids = dict(
+    corpus_ids: dict[str, str] = dict(
         zip(
             sorted(coca_cats),
             [string.ascii_uppercase[i] for i in range(len(coca_cats))],
             strict=True,
         ),
     )
-    coca_text_cats = groupby(
-        coca_texts,
-        lambda x: re.search(r"_.+_", str(x), re.IGNORECASE).group(0),  # type: ignore[attr-defined]
-    )
+    print(corpus_ids)
+    coca_text_groups = groupby(coca_texts, _capture_coca_cat)
     coca_text_cats = [
-        (cat_name, list(cat_chunk)) for cat_name, cat_chunk in coca_text_cats
+        (cat_name, list(cat_chunk)) for cat_name, cat_chunk in coca_text_groups
     ]
     return corpus_ids, coca_text_cats
 
 
 def _process_coca(
     corpus_path: Path,
-    cat_chunk: list,
+    cat_chunk: list[Path],
     cat_name: str,
-    corpus_ids: dict,
+    corpus_ids: dict[str, str],
     chunk_size: int = 5,
 ) -> None:
     """Build the CoCA corpus.
@@ -122,24 +131,19 @@ def _process_coca(
         Defaults to 5. Larger numbers might improve speed at the cost of memory.
 
     """
-    short_name = re.search("acad|blog|fic|mag|news|spok|tvm|web", cat_name)
-    if short_name:
-        logger.info("Adding subcorpus '%s'.", short_name.group())
-    # ? Could maybe flatten this loop
-    text_chunks = [
-        cat_chunk[i : i + chunk_size] for i in range(0, len(cat_chunk), chunk_size)
-    ]
+    logger.info("Adding subcorpus '%s'.", cat_name)
+    text_batches = batched(cat_chunk, chunk_size)
+    text_chunks: list[str] = []
+    for batch in text_batches:
+        texts = (text.read_text() for text in batch)
+        text_chunk: str = reduce(lambda x, y: x + " \n " + y, texts)
+        text_chunks.append(text_chunk)
+
     for chunk in text_chunks:
-        chunk_text = ""
-        chunk_cat = corpus_ids[cat_name]
-        for coca_text in chunk:
-            with coca_text.open() as corpus_file:
-                raw_lines = corpus_file.read()
-            chunk_text = chunk_text + " \n " + raw_lines
-        ngram_dicts = preprocess.preprocess_corpus(
-            raw_lines=chunk_text,
+        ngram_dicts: dict[str, list[tuple[object, ...]]] = preprocess.preprocess_corpus(
+            raw_lines=chunk,
             corpus="coca",
-            corpus_id=chunk_cat,
+            corpus_id=corpus_ids[cat_name],
         )
         create.add_chunk(path=corpus_path, ngrams=ngram_dicts)
 
@@ -149,7 +153,7 @@ def make_processed_corpus(
     corpus_dir: str | Path = "test",
     chunk_size: int = 1000000,
     threshold: int = 2,
-    env_config: dict = create.DEFAULT_CONFIG,
+    env_config: dict[str, str | int | None] = create.DEFAULT_CONFIG,
 ) -> None:
     """Construct and allocate the data of a corpus object.
 
@@ -176,19 +180,21 @@ def make_processed_corpus(
 
     """
     db_path = Path(f"chunky/db/{corpus_name}.db")
-    create.init_corpus(db_path)
+
     if not create.validate_corpus_name(corpus_name):
         msg = "Not a valid corpus name."
         raise ValueError(msg)
-    if corpus_name == "test":
-        ngrams = _process_test()
-        create.add_chunk(db_path, ngrams)
 
-        # ? Turn into registry of functions?
+    create.init_corpus(db_path)
+
+    if corpus_name == "test":
+        ngrams: dict[str, list[tuple[object, ...]]] = _process_test()
+        create.add_chunk(db_path, ngrams)
 
     elif corpus_name == "bnc":
         corpus_dir = Path(corpus_dir)
         _process_bnc(corpus_path=db_path, corpus_dir=corpus_dir, chunk_size=chunk_size)
+
     elif corpus_name in {"coca", "coca_sample", "coca_fourgrams"}:
         corpus_dir = Path(corpus_dir)
         corpus_ids, coca_text_cats = _prepare_coca(corpus_dir)
@@ -200,8 +206,9 @@ def make_processed_corpus(
                 corpus_ids=corpus_ids,
             )
     else:
-        exception_msg = "Corpus not supported."
-        raise NotImplementedError(exception_msg)
+        msg = "Corpus not supported."
+        raise NotImplementedError(msg)
+
     logger.info("Done adding to DB. Consolidating...")
     create.consolidate_corpus(
         path=db_path,
