@@ -41,12 +41,12 @@ VARIABLE_NAMES: list[str] = [
     "fw_assoc",
     "bw_assoc",
 ]
-BIGRAM_LEN: int = 2
-TRIGRAM_LEN: int = 3
-FOURGRAM_LEN: int = 4
+BIGRAM_LEN = 2
+TRIGRAM_LEN = 3
+FOURGRAM_LEN = 4
 
 
-def min_max(column: pd.Series) -> pd.Series:
+def min_max(column: pd.Series) -> pd.Series[float]:
     """Min-max normalize a column of a dataframe.
 
     Take the column of a pandas DataFrame and normalize it
@@ -61,9 +61,9 @@ def min_max(column: pd.Series) -> pd.Series:
         values of the original column.
 
     """
-    min_value: float = cast(float, column.min())
-    max_value: float = cast(float, column.max())
-    column_norm = column - min_value
+    min_value = cast(float, column.min())
+    max_value = cast(float, column.max())
+    column_norm = cast(pd.Series[float], column - min_value)
     return column_norm.div(max_value - min_value)
 
 
@@ -200,7 +200,7 @@ class Fetcher:
         trigrams: list[tuple[str, ...]] = []
         fourgrams: list[tuple[str, ...]] = []
         for ngram in all_ngrams:
-            split_ngram = ngram.split()
+            split_ngram: list[str] = ngram.split()
             len_ngram = len(split_ngram)
             if len_ngram >= BIGRAM_LEN:
                 bigrams.append((split_ngram[0], split_ngram[1]))
@@ -237,6 +237,9 @@ class Fetcher:
 
         """
         unique_ngrams: list[str] = list(set(ngrams))
+        bigrams: list[list[str]]
+        trigrams: list[list[str]]
+        fourgrams: list[list[str]]
         bigrams, trigrams, fourgrams = self._split_ngrams(unique_ngrams)
         bigram_query: NgramQuery = NgramQuery(bigrams, "ug_1", "ug_2", 2)
         trigram_query: NgramQuery = NgramQuery(trigrams, "big_1", "ug_3", 3)
@@ -271,8 +274,8 @@ class Fetcher:
             list[str]: List of all ngrams of supported length contained in the text.
 
         """
-        this_text = text.split(line_sep)
-        this_text = pd.Series(this_text)
+        split_text: list[str] = text.split(line_sep)
+        this_text: pd.Series[str] = pd.Series(split_text)
         this_text = this_text.str.lower()
         this_text = this_text.str.replace("\n", "")
         this_text = this_text.str.replace("-", " ")
@@ -286,25 +289,6 @@ class Fetcher:
         this_text = this_text.str.replace(r"\s+", " ", regex=True)
         all_ngrams: pd.Series[list[str]] = this_text.apply(get_and_join_ngrams)  # pyright: ignore[reportUnknownMemberType]
         return [ngram for line in all_ngrams.to_list() for ngram in line]
-
-    def _get_ngrams_text(
-        self,
-        text: str,
-        **kwargs: str,
-    ) -> list[str]:
-        """Allocate scores for a chunk of text.
-
-        Makes and allocates as attributes of this Helper instance the
-        scores for the text provided as input. First cleans and splits it,
-        then queries the corpus through the method for lists of ngrams.
-
-        Args:
-            text (str): A chunk of text to be processed.
-            **kwargs (str): Arguments to be passed on to _process_text.
-
-        """
-        ngrams = self._process_text(text=text, **kwargs)
-        return ngrams
 
     def _normalize_results(
         self,
@@ -483,7 +467,7 @@ class Fetcher:
             raise NotImplementedError(except_msg)
         if isinstance(ngrams, str):
             ngrams = ngrams.lower()
-            ngrams = self._get_ngrams_text(str(ngrams), **kwargs)
+            ngrams = self._process_text(str(ngrams), **kwargs)
         else:
             ngrams = [ngram.lower() for ngram in ngrams]
             ngrams = list(ngrams)

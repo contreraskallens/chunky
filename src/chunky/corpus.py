@@ -261,7 +261,6 @@ class Corpus:
                     sa.text(f"DESCRIBE SELECT * FROM PARQUET_SCAN('{self._ngram_db}')"),  # noqa: S608 Validated before
                 ).fetchall(),
             )
-        print(parquet_columns)
         corpus_columns: list[str] = [
             column[0]
             for column in parquet_columns
@@ -556,10 +555,10 @@ class Corpus:
         )
         return results.join(
             type_1_cte,
-            (get_column(ReducedQuery, "comp_2") == get_column(type_1_query, "comp_2")),
+            (get_column(ReducedQuery, "comp_2") == get_column(type_1_cte, "comp_2")),
         ).join(
             type_2_cte,
-            (get_column(ReducedQuery, "comp_1") == get_column(type_2_query, "comp_1")),
+            (get_column(ReducedQuery, "comp_1") == get_column(type_2_cte, "comp_1")),
         )
 
     def _get_prop_columns(
@@ -657,18 +656,21 @@ class Corpus:
                 corpus_columns.append(column)
 
         dispersion: sa.Select[tuple[object, object, float]] = select(
-            get_column(reduced_table, "comp_1"),
-            get_column(reduced_table, "comp_2"),
+            get_column(reduced_cte, "comp_1"),
+            get_column(reduced_cte, "comp_2"),
             self._get_dispersion_column(
                 corpus_columns,
-                cast(sa.ColumnElement[float], get_column(reduced_table, "freq")),
+                cast(sa.ColumnElement[float], get_column(reduced_cte, "freq")),
             ).label("dispersion"),
         )
         dispersion_cte: sa.CTE = dispersion.cte()
-        return select(ReducedQuery, get_column(dispersion, "dispersion")).join(
+        return select(ReducedQuery, get_column(dispersion_cte, "dispersion")).join(
             dispersion_cte,
-            (get_column(dispersion, "comp_1") == get_column(ReducedQuery, "comp_1"))
-            & (get_column(dispersion, "comp_2") == get_column(ReducedQuery, "comp_2")),
+            (get_column(dispersion_cte, "comp_1") == get_column(ReducedQuery, "comp_1"))
+            & (
+                get_column(dispersion_cte, "comp_2")
+                == get_column(ReducedQuery, "comp_2")
+            ),
         )
 
     def _get_rel_freqs(
@@ -701,11 +703,17 @@ class Corpus:
         )
         rel_freqs = rel_freqs.join(
             source_freq_cte,
-            (get_column(source_freq, "comp_1") == get_column(ReducedQuery, "comp_1")),
+            (
+                get_column(source_freq_cte, "comp_1")
+                == get_column(ReducedQuery, "comp_1")
+            ),
         )
         return rel_freqs.join(
             target_freq_cte,
-            (get_column(target_freq, "comp_2") == get_column(ReducedQuery, "comp_2")),
+            (
+                get_column(target_freq_cte, "comp_2")
+                == get_column(ReducedQuery, "comp_2")
+            ),
         )
 
     def _get_probs(
@@ -835,7 +843,7 @@ class Corpus:
             id_columns.append(get_column(token_freq_cte, "target"))
         total_freq: sa.Select[tuple[object, ...]] = select(
             *id_columns,
-            sa.func.sum(get_column(token_freq, "freq")).label("total_freq"),
+            sa.func.sum(get_column(token_freq_cte, "freq")).label("total_freq"),
         ).group_by(*id_columns)
         total_freq_cte: sa.CTE = total_freq.cte()
         if cf:
@@ -845,10 +853,13 @@ class Corpus:
             ).join(
                 total_freq_cte,
                 (
-                    (get_column(total_freq, column) == get_column(token_freq, column))
+                    (
+                        get_column(total_freq_cte, column)
+                        == get_column(token_freq_cte, column)
+                    )
                     & (
-                        get_column(total_freq, "target")
-                        == get_column(total_freq, "target")
+                        get_column(total_freq_cte, "target")
+                        == get_column(total_freq_cte, "target")
                     )
                 ),
             )
@@ -857,7 +868,7 @@ class Corpus:
             total_freq_cte.c.total_freq,
         ).join(
             total_freq_cte,
-            (get_column(total_freq, column) == get_column(token_freq, column)),
+            (get_column(total_freq_cte, column) == get_column(token_freq_cte, column)),
         )
 
     def _get_info(
@@ -886,8 +897,8 @@ class Corpus:
         weighted_info: sa.Select[tuple[int, int, float, float, float]] = select(
             total_freq_cte,
             self._get_info(
-                get_column(total_freq, "freq"),
-                get_column(total_freq, "total_freq"),
+                get_column(total_freq_cte, "freq"),
+                get_column(total_freq_cte, "total_freq"),
             ).label("weighted_info"),
         )
         weighted_info_cte: sa.CTE = weighted_info.cte()
@@ -903,6 +914,7 @@ class Corpus:
             ),
             sa.func.count(get_column(weighted_info_cte, "weighted_info")).label("n"),
         ).group_by(*wi_id_columns)
+
         entropy_cte: sa.CTE = entropy.cte()
 
         ent_id_columns: list[sa.Column[object]] = [
@@ -910,9 +922,12 @@ class Corpus:
         ]
         if cf:
             ent_id_columns.append(get_column(entropy_cte, "target"))
+
         return select(
             *ent_id_columns,
-            (entropy.c.raw_entropy / sa.func.log2(entropy.c.n)).label("entropy"),
+            (entropy_cte.c.raw_entropy / sa.func.log2(entropy_cte.c.n)).label(
+                "entropy"
+            ),
         )
 
     def _get_mult_table(
@@ -1002,6 +1017,7 @@ class Corpus:
         entropy_1: sa.Select[tuple[object, object, float]] = self._get_entropy(
             db, "comp_2", "comp_1"
         )
+
         entropy_1_cte: sa.CTE = entropy_1.cte()
         entropy_2: sa.Select[tuple[object, object, float]] = self._get_entropy(
             db, "comp_1", "comp_2"
@@ -1015,13 +1031,13 @@ class Corpus:
             )
             .join(
                 entropy_1_cte,
-                (ReducedQuery.comp_1 == get_column(entropy_1, "comp_1"))
-                & (ReducedQuery.comp_2 == get_column(entropy_1, "comp_2")),
+                (ReducedQuery.comp_1 == get_column(entropy_1_cte, "comp_1"))
+                & (ReducedQuery.comp_2 == get_column(entropy_1_cte, "comp_2")),
             )
             .join(
                 entropy_2_cte,
-                (ReducedQuery.comp_1 == get_column(entropy_2, "comp_1"))
-                & (ReducedQuery.comp_2 == get_column(entropy_2, "comp_2")),
+                (ReducedQuery.comp_1 == get_column(entropy_2_cte, "comp_1"))
+                & (ReducedQuery.comp_2 == get_column(entropy_2_cte, "comp_2")),
             )
         )
 
@@ -1035,22 +1051,30 @@ class Corpus:
             length (int): The length of the queried ngrams.
 
         """
+        all_results: sa.CTE = select(ReducedQuery).cte()
         results_cte: list[sa.CTE] = [result.cte() for result in ngram_query.results]
-
         for result in results_cte:
-            measure_columns: list[sa.ColumnElement[float]] = [
-                cast(sa.ColumnElement[float], column)
+            measure_columns = [
+                cast(str, column.name)
                 for column in result.c
                 if cast(str, column.name) not in ["comp_1", "comp_2", "id"]
             ]
-            all_results: sa.Select[RESULTS_ROW_STRUCT] = select(
-                ReducedQuery, *measure_columns
-            ).join(
-                result,
-                (get_column(ReducedQuery, "comp_1") == get_column(result, "comp_1"))
-                & (get_column(ReducedQuery, "comp_2") == get_column(result, "comp_2")),
+            all_results = (
+                select(
+                    all_results,
+                    *[get_column(result, column) for column in measure_columns],
+                )
+                .join(
+                    result,
+                    (get_column(all_results, "comp_1") == get_column(result, "comp_1"))
+                    & (
+                        get_column(all_results, "comp_2")
+                        == get_column(result, "comp_2")
+                    ),
+                )
+                .cte()
             )
-            return all_results.cte()
+        return all_results
 
     def _get_all_scores(self, ngram_query: NgramQuery) -> sa.CTE:
         """Allocate all measures for the ngrams in the query table"""

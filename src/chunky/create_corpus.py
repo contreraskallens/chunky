@@ -4,14 +4,14 @@ import os
 import re
 from functools import reduce
 from pathlib import Path
-
+from typing import cast
 
 import duckdb
 import pandas as pd
 
-ALLOWED_CORPORA = ["coca", "coca_sample", "bnc", "test"]
-TEMP_DIR = Path("chunky/db/temp")
-CORPUS_DIR = Path("chunky/db")
+ALLOWED_CORPORA: list[str] = ["coca", "coca_sample", "bnc", "test"]
+TEMP_DIR: Path = Path("chunky/db/temp")
+CORPUS_DIR: Path = Path("chunky/db")
 DEFAULT_CONFIG: dict[str, str | int | None] = {"memory_limit": 20, "cpu_cores": None}
 
 
@@ -26,6 +26,11 @@ def validate_corpus_name(name: str) -> bool:
 
 
 def register_corpus(name: str) -> None:
+    """
+
+    Args:
+        name:
+    """
     if validate_corpus_name(name):
         ALLOWED_CORPORA.append(name)
 
@@ -85,25 +90,27 @@ def init_corpus(path: Path) -> None:
         """)
 
 
-def _get_chunk_dfs(ngrams: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    chunk_unigrams = ngrams["unigrams"]
-    chunk_ngrams = ngrams["fourgrams"]
+def _get_chunk_dfs(
+    ngrams: dict[str, tuple[object, ...]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    chunk_unigrams = cast(tuple[str, str, int], ngrams["unigrams"])
+    chunk_ngrams = cast(tuple[str, str, str, str, int], ngrams["fourgrams"])
 
-    chunk_unigrams = pd.DataFrame(
+    chunk_unigrams_df: pd.DataFrame = pd.DataFrame(
         chunk_unigrams, columns=pd.Index(["corpus", "ug", "freq"])
     )
-    chunk_unigrams["corpus"] = chunk_unigrams["corpus"].astype(str)
-    chunk_ngrams = pd.DataFrame(
+    chunk_unigrams_df["corpus"] = chunk_unigrams_df["corpus"].astype(str)
+    chunk_ngrams_df: pd.DataFrame = pd.DataFrame(
         chunk_ngrams,
         columns=pd.Index(["corpus", "ug_1", "ug_2", "ug_3", "ug_4", "freq"]),
     )
-    chunk_ngrams["corpus"] = chunk_ngrams["corpus"].astype(str)
-    chunk_ngrams["big_1"] = chunk_ngrams["ug_1"] + " " + chunk_ngrams["ug_2"]
-    chunk_ngrams["trig_1"] = chunk_ngrams["big_1"] + " " + chunk_ngrams["ug_3"]
-    return chunk_unigrams, chunk_ngrams
+    chunk_ngrams_df["corpus"] = chunk_ngrams_df["corpus"].astype(str)
+    chunk_ngrams_df["big_1"] = chunk_ngrams_df["ug_1"] + " " + chunk_ngrams_df["ug_2"]
+    chunk_ngrams_df["trig_1"] = chunk_ngrams_df["big_1"] + " " + chunk_ngrams_df["ug_3"]
+    return chunk_unigrams_df, chunk_ngrams_df
 
 
-def add_chunk(path: Path, ngrams: dict) -> None:
+def add_chunk(path: Path, ngrams: dict[str, tuple[object, ...]]) -> None:
     """Add ngram to the corpus.
 
     For use during allocation of ngram table. Takes unigram and
@@ -114,6 +121,8 @@ def add_chunk(path: Path, ngrams: dict) -> None:
         ngram_lists (tuple): Tuple of unigram, fourgram frequency counts.
 
     """
+    chunk_unigrams: pd.DataFrame
+    chunk_ngrams: pd.DataFrame
     chunk_unigrams, chunk_ngrams = _get_chunk_dfs(ngrams)
     with duckdb.connect(path) as conn:
         _ = conn.register("unigram_df", chunk_unigrams)
@@ -165,7 +174,7 @@ def add_chunk(path: Path, ngrams: dict) -> None:
 
 
 def _get_valid_corpora(conn: duckdb.DuckDBPyConnection) -> list[str]:
-    all_corpora = conn.execute(
+    all_corpora_ref: list[tuple[str, ...]] = conn.execute(
         """
         SELECT DISTINCT
             corpus
@@ -173,10 +182,10 @@ def _get_valid_corpora(conn: duckdb.DuckDBPyConnection) -> list[str]:
             ngram_db_temp
             """,
     ).fetchall()
-    all_corpora = [str(corpus_list[0]) for corpus_list in all_corpora]
+    all_corpora = [str(corpus_list[0]) for corpus_list in all_corpora_ref]
     all_corpora.sort()
     # Validate corpora names to avoid SQL injection
-    valid_corpora = []
+    valid_corpora: list[str] = []
     for corpus in all_corpora:
         if not is_valid_identifier(corpus):
             msg = f"{corpus} is not a valid corpus name"
@@ -186,8 +195,8 @@ def _get_valid_corpora(conn: duckdb.DuckDBPyConnection) -> list[str]:
 
 
 def _pivot_tables(conn: duckdb.DuckDBPyConnection, valid_corpora: list[str]) -> None:
-    corpora_query = reduce(lambda x, y: x + ", " + y, valid_corpora)
-    temp_file = TEMP_DIR / "ngram_db_raw.parquet"
+    corpora_query: str = reduce(lambda x, y: x + ", " + y, valid_corpora)
+    temp_file: Path = TEMP_DIR / "ngram_db_raw.parquet"
     temp_file = temp_file.resolve()
     pivot_ngram_q = f"""
     COPY (
@@ -215,9 +224,9 @@ def _pivot_tables(conn: duckdb.DuckDBPyConnection, valid_corpora: list[str]) -> 
 
 
 def _coalesce_corpus(conn: duckdb.DuckDBPyConnection) -> None:
-    temp_read = TEMP_DIR / "ngram_db_raw.parquet"
+    temp_read: Path = TEMP_DIR / "ngram_db_raw.parquet"
     temp_read = temp_read.resolve()
-    temp_write = TEMP_DIR / "ngram_db_coalesced.parquet"
+    temp_write: Path = TEMP_DIR / "ngram_db_coalesced.parquet"
     temp_write = temp_write.resolve()
 
     coalesce_ngrams = f"""
@@ -253,9 +262,9 @@ def _coalesce_corpus(conn: duckdb.DuckDBPyConnection) -> None:
 
 
 def _make_freqs(conn: duckdb.DuckDBPyConnection) -> None:
-    temp_read = TEMP_DIR / "ngram_db_coalesced.parquet"
+    temp_read: Path = TEMP_DIR / "ngram_db_coalesced.parquet"
     temp_read = temp_read.resolve()
-    temp_write = TEMP_DIR / "ngram_db_freq.parquet"
+    temp_write: Path = TEMP_DIR / "ngram_db_freq.parquet"
     temp_write = temp_write.resolve()
     ngram_freq = f"""
             COPY (
@@ -292,10 +301,10 @@ def _make_freqs(conn: duckdb.DuckDBPyConnection) -> None:
     temp_read.unlink()
 
 
-def _sum_freqs(conn: duckdb.DuckDBPyConnection, valid_corpora: list) -> None:
-    temp_read = TEMP_DIR / "ngram_db_freq.parquet"
+def _sum_freqs(conn: duckdb.DuckDBPyConnection, valid_corpora: list[str]) -> None:
+    temp_read: Path = TEMP_DIR / "ngram_db_freq.parquet"
     temp_read = temp_read.resolve()
-    temp_write = TEMP_DIR / "ngram_db_summed.parquet"
+    temp_write: Path = TEMP_DIR / "ngram_db_summed.parquet"
     temp_write = temp_write.resolve()
 
     corpus_sum_query = [f"SUM({corpus}) AS {corpus}" for corpus in valid_corpora]
@@ -346,7 +355,6 @@ def _finalize_corpus(
     corpus_name: str,
     threshold: int = 2,
 ) -> None:
-    # Finalize unigrams first
     unigram_finalize = """
     CREATE OR REPLACE TABLE unigram_db AS (
         SELECT
@@ -358,14 +366,13 @@ def _finalize_corpus(
     )
     """
 
-    # Now ngrams
-    temp_read = TEMP_DIR / "ngram_db_summed.parquet"
+    temp_read: Path = TEMP_DIR / "ngram_db_summed.parquet"
     temp_read = temp_read.resolve()
     if corpus_name not in ALLOWED_CORPORA or not validate_corpus_name(corpus_name):
         msg = f"{corpus_name} is not an allowed corpus."
         raise ValueError(msg)
 
-    ngram_file = CORPUS_DIR / f"{corpus_name}_ngrams.parquet"
+    ngram_file: Path = CORPUS_DIR / f"{corpus_name}_ngrams.parquet"
     ngram_file = ngram_file.resolve()
 
     # Check for relative to avoid directory traversal
@@ -441,7 +448,7 @@ def consolidate_corpus(
         TEMP_DIR.resolve().mkdir(parents=True)
     with duckdb.connect(path) as conn:
         _config_env(conn=conn, env_config=env_config)
-        valid_corpora = _get_valid_corpora(conn)
+        valid_corpora: list[str] = _get_valid_corpora(conn)
         _pivot_tables(conn=conn, valid_corpora=valid_corpora)
         _coalesce_corpus(conn)
         _make_freqs(conn)
