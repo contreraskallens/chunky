@@ -91,7 +91,7 @@ def init_corpus(path: Path) -> None:
 
 
 def _get_chunk_dfs(
-    ngrams: dict[str, list[tuple[object, ...]]],
+    ngrams: dict[str, list[tuple[str | int, ...]]],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     chunk_unigrams = cast(list[tuple[str, str, int]], ngrams["unigrams"])
     chunk_ngrams = cast(list[tuple[str, str, str, str, int]], ngrams["fourgrams"])
@@ -110,7 +110,7 @@ def _get_chunk_dfs(
     return chunk_unigrams_df, chunk_ngrams_df
 
 
-def add_chunk(path: Path, ngrams: dict[str, list[tuple[object, ...]]]) -> None:
+def add_chunk(path: Path, ngrams: dict[str, list[tuple[str | int, ...]]]) -> None:
     """Add ngram to the corpus.
 
     For use during allocation of ngram table. Takes unigram and
@@ -118,7 +118,8 @@ def add_chunk(path: Path, ngrams: dict[str, list[tuple[object, ...]]]) -> None:
     Meant to be accessed by the processing_corpus methods.
 
     Args:
-        ngram_lists (tuple): Tuple of unigram, fourgram frequency counts.
+        ngrams(dictionary): A dictionary with a "unigrams" key and a "fourgrams" key,
+        values of the corresponding list of tuples of corpus, unigram(s), and frequency.
 
     """
     chunk_unigrams: pd.DataFrame

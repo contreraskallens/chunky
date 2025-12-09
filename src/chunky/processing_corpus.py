@@ -17,7 +17,7 @@ from . import preprocessing_corpus as preprocess
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-def _process_test() -> dict[str, list[tuple[object, ...]]]:
+def _process_test() -> dict[str, list[tuple[str | int, ...]]]:
     """Build the test corpus.
 
     Processes the test corpus from Gries' original publication and
@@ -55,7 +55,7 @@ def _process_bnc(
             raw_lines: list[str] = corpus_file.readlines(chunk_size)
             if not raw_lines:
                 break
-            ngram_dicts: dict[str, list[tuple[object, ...]]] = (
+            ngram_dicts: dict[str, list[tuple[str | int, ...]]] = (
                 preprocess.preprocess_corpus(
                     corpus="bnc",
                     raw_lines=raw_lines,
@@ -102,7 +102,6 @@ def _prepare_coca(
             strict=True,
         ),
     )
-    print(corpus_ids)
     coca_text_groups = groupby(coca_texts, _capture_coca_cat)
     coca_text_cats = [
         (cat_name, list(cat_chunk)) for cat_name, cat_chunk in coca_text_groups
@@ -140,10 +139,12 @@ def _process_coca(
         text_chunks.append(text_chunk)
 
     for chunk in text_chunks:
-        ngram_dicts: dict[str, list[tuple[object, ...]]] = preprocess.preprocess_corpus(
-            raw_lines=chunk,
-            corpus="coca",
-            corpus_id=corpus_ids[cat_name],
+        ngram_dicts: dict[str, list[tuple[str | int, ...]]] = (
+            preprocess.preprocess_corpus(
+                raw_lines=chunk,
+                corpus="coca",
+                corpus_id=corpus_ids[cat_name],
+            )
         )
         create.add_chunk(path=corpus_path, ngrams=ngram_dicts)
 
@@ -188,7 +189,7 @@ def make_processed_corpus(
     create.init_corpus(db_path)
 
     if corpus_name == "test":
-        ngrams: dict[str, list[tuple[object, ...]]] = _process_test()
+        ngrams: dict[str, list[tuple[str | int, ...]]] = _process_test()
         create.add_chunk(db_path, ngrams)
 
     elif corpus_name == "bnc":
