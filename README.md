@@ -1,6 +1,6 @@
 # Multiword unit measures
 Package of functions to obtain MWU scores for chunks.
-Based on the proposal by Stefan Gries, "Multi-word units (and tokenization more generally): a multi-dimensional and largely information-theoretic approach", https://journals.openedition.org/lexis/6231.
+Largely based on the proposal by Stefan Gries, "Multi-word units (and tokenization more generally): a multi-dimensional and largely information-theoretic approach", https://journals.openedition.org/lexis/6231.
 
 # How to use this package
 This package leverages the `duckdb` SQL-like engine to provide fast access with an easy interface.
